@@ -66,6 +66,14 @@ def replace_source(conn: sqlite3.Connection, source: str, items: Iterable[Item])
     return len(rows)
 
 
+def prune_sources(conn: sqlite3.Connection, keep: list[str]) -> None:
+    marks = ",".join("?" * len(keep))
+    with conn:
+        conn.execute(f"DELETE FROM items WHERE source NOT IN ({marks})" if keep
+                     else "DELETE FROM items", keep)
+        conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+
+
 def _fts_query(q: str) -> str:
     terms = re.findall(r"\w+", q, flags=re.UNICODE)
     return " ".join(f'"{t}"*' for t in terms)

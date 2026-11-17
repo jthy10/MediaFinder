@@ -5,41 +5,55 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MediaFinder</title>
 <style>
-  :root { color-scheme: dark light; --bg:#14161a; --card:#1d2026; --fg:#e6e8eb; --mut:#8b93a0; --acc:#6c8cff; --bd:#2a2e36; }
+  :root { color-scheme: dark light; --bg:#14161a; --card:#1d2026; --fg:#e6e8eb; --mut:#8b93a0; --acc:#6c8cff; --bd:#2a2e36; --ok:#3fb57a; --err:#e5484d; }
   @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --card:#fff; --fg:#1a1d21; --mut:#69707d; --bd:#dde0e5; } }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; gap:1rem; align-items:center; padding:1rem 1.5rem; border-bottom:1px solid var(--bd); flex-wrap:wrap; }
-  h1 { font-size:1.2rem; margin:0; }
-  .stats { color:var(--mut); font-size:.9rem; flex:1; }
+  header { display:flex; gap:1rem; align-items:center; padding:.8rem 1.5rem; border-bottom:1px solid var(--bd); flex-wrap:wrap; }
+  h1 { font-size:1.2rem; margin:0; } h2 { font-size:1.05rem; margin:0 0 .6rem; } h3 { font-size:.9rem; margin:1rem 0 .4rem; color:var(--mut); font-weight:600; }
+  nav { display:flex; gap:.25rem; } nav button { border:0; background:none; color:var(--mut); padding:.4rem .8rem; border-radius:8px; }
+  nav button.on { background:var(--card); color:var(--fg); }
+  .stats { color:var(--mut); font-size:.9rem; flex:1; text-align:right; }
   main { max-width:1100px; margin:0 auto; padding:1.5rem; }
-  .bar { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem; }
-  input,select,button { font:inherit; padding:.55rem .75rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
-  input[type=search] { flex:1; min-width:220px; }
+  .bar,.row { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.7rem; align-items:center; }
+  input,select,button { font:inherit; padding:.5rem .7rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+  input[type=search] { flex:1; min-width:220px; } input[type=checkbox] { padding:0; }
+  .grow { flex:1; min-width:140px; }
   button { cursor:pointer; } button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
-  button:disabled { opacity:.5; cursor:default; }
+  button.danger { color:var(--err); } button:disabled { opacity:.5; cursor:default; }
   table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--bd); border-radius:10px; overflow:hidden; }
   th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--bd); }
-  th { color:var(--mut); font-weight:500; font-size:.85rem; }
-  tr:last-child td { border-bottom:0; }
+  th { color:var(--mut); font-weight:500; font-size:.85rem; } tr:last-child td { border-bottom:0; }
   .tag { font-size:.75rem; padding:.1rem .45rem; border-radius:99px; border:1px solid var(--bd); color:var(--mut); }
-  .path { color:var(--mut); font-size:.8rem; word-break:break-all; }
+  .path,.hint { color:var(--mut); font-size:.8rem; word-break:break-all; }
   .foot { display:flex; justify-content:space-between; align-items:center; margin-top:1rem; color:var(--mut); }
   .msg { color:var(--mut); padding:2rem; text-align:center; }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:1.1rem 1.2rem; margin-bottom:1.2rem; }
+  .chips { display:flex; gap:.4rem; flex-wrap:wrap; margin:.4rem 0; }
+  .chip { cursor:pointer; background:var(--bg); } .chip:hover,.chip.sel { border-color:var(--acc); }
+  .ok { color:var(--ok); } .err { color:var(--err); } .mut { color:var(--mut); }
+  .browser { border:1px solid var(--bd); border-radius:8px; max-height:220px; overflow:auto; margin:.4rem 0; background:var(--bg); }
+  .browser div { padding:.35rem .7rem; cursor:pointer; border-bottom:1px solid var(--bd); } .browser div:hover { background:var(--card); }
+  .browser div:last-child { border-bottom:0; }
+  .src { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bd); }
+  .src:last-child { border-bottom:0; }
+  .hidden { display:none !important; }
 </style>
 </head>
 <body>
 <header>
   <h1>🎞️ MediaFinder</h1>
+  <nav><button id="nav-lib" class="on">Library</button><button id="nav-set">Settings</button></nav>
   <div class="stats" id="stats"></div>
   <button id="sync">Sync now</button>
 </header>
-<main>
+
+<main id="view-lib">
   <div class="bar">
     <input type="search" id="q" placeholder="Search titles, descriptions, genres…" autofocus>
     <select id="type"><option value="">All types</option><option value="movie">Movies</option><option value="series">Series</option><option value="album">Albums</option></select>
     <select id="library"><option value="">All libraries</option></select>
-    <select id="source"><option value="">All sources</option><option value="jellyfin">Jellyfin</option><option value="folder">Folder</option></select>
+    <select id="source"><option value="">All sources</option></select>
     <select id="fmt"><option value="csv">CSV</option><option value="txt">Plain text</option><option value="json">JSON</option></select>
     <button class="primary" id="export">Export list</button>
   </div>
@@ -49,32 +63,125 @@
   </table>
   <div class="foot"><span id="count"></span><span><button id="prev">←</button> <button id="next">→</button></span></div>
 </main>
+
+<main id="view-set" class="hidden">
+  <div class="card" id="jf-card">
+    <h2>Jellyfin server</h2>
+    <div id="jf-current" class="row"></div>
+    <div class="row">
+      <button id="jf-scan">🔍 Find servers on my network</button>
+      <input id="jf-cidr" class="grow" placeholder="Optional: also scan range, e.g. 192.168.1.0/24" title="Broadcast discovery needs host networking; scanning a range works from any container">
+    </div>
+    <div id="jf-found" class="chips"></div>
+    <div class="row">
+      <input id="jf-url" class="grow" placeholder="http://192.168.1.10:8096">
+    </div>
+    <div class="row">
+      <input id="jf-user" class="grow" placeholder="Jellyfin username">
+      <input id="jf-pass" class="grow" type="password" placeholder="Password">
+      <span class="mut">or</span>
+      <input id="jf-key" class="grow" placeholder="API key">
+    </div>
+    <div class="row"><button class="primary" id="jf-save">Connect &amp; save</button><span id="jf-msg"></span></div>
+    <div class="hint">Your password is only used to obtain an access token; the token is stored, not the password.</div>
+  </div>
+
+  <div class="card">
+    <h2>NAS / media folders</h2>
+    <div id="src-list"></div>
+    <h3>Add a folder</h3>
+    <div class="row">
+      <label><input type="radio" name="stype" value="smb" checked> Network share (SMB)</label>
+      <label><input type="radio" name="stype" value="local"> Folder inside the container</label>
+    </div>
+
+    <div id="smb-box">
+      <div class="row">
+        <button id="smb-scan">🔍 Find NAS on my network</button>
+        <input id="smb-cidr" class="grow" placeholder="Range to scan, e.g. 192.168.1.0/24">
+      </div>
+      <div id="smb-found" class="chips"></div>
+      <div class="row">
+        <input id="smb-host" class="grow" placeholder="NAS address, e.g. 192.168.1.20 or nas.local">
+        <input id="smb-user" class="grow" placeholder="Username (blank = guest)" autocomplete="off">
+        <input id="smb-pass" class="grow" type="password" placeholder="Password" autocomplete="new-password">
+        <input id="smb-domain" placeholder="Domain (optional)" style="width:150px">
+        <button id="smb-connect">List shares</button>
+      </div>
+      <div id="smb-shares" class="chips"></div>
+    </div>
+
+    <div id="browse-box" class="hidden">
+      <div class="row"><b id="browse-path"></b><span class="hint">Click a folder to open it</span></div>
+      <div class="browser" id="browse-list"></div>
+    </div>
+
+    <div id="add-box" class="hidden">
+      <div class="row">
+        <label><input type="checkbox" id="add-single"> This folder is a single library (e.g. “Movies”)</label>
+        <select id="add-hint"><option value="auto">Detect movies / TV automatically</option><option value="movie">Treat as movies</option><option value="episode">Treat as TV shows</option></select>
+        <input id="add-label" class="grow" placeholder="Name (optional)">
+      </div>
+      <div class="row"><button class="primary" id="add-btn">Add this folder</button><span id="add-msg"></span></div>
+      <div class="hint">Unticked: each sub-folder (Movies, TV…) becomes its own library.</div>
+    </div>
+    <div id="src-msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Automatic sync</h2>
+    <div class="row">
+      <select id="interval">
+        <option value="0">Manual only</option><option value="15">Every 15 minutes</option><option value="60">Every hour</option>
+        <option value="360">Every 6 hours</option><option value="1440">Daily</option>
+      </select><span id="int-msg" class="ok"></span>
+    </div>
+  </div>
+</main>
+
 <script>
 const $ = id => document.getElementById(id), PAGE = 50;
-let offset = 0, total = 0, timer;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const params = () => {
-  const p = new URLSearchParams();
-  for (const k of ['q','type','library','source']) if ($(k).value) p.set(k, $(k).value);
-  return p;
+const api = async (url, body, method) => {
+  const r = await fetch(url, body === undefined ? { method: method || 'GET' } :
+    { method: method || 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
 };
+const say = (el, text, cls) => { el.className = cls || ''; el.textContent = text; };
+const busy = async (btn, label, fn) => { const o = btn.textContent; btn.disabled = true; btn.textContent = label;
+  try { return await fn(); } finally { btn.disabled = false; btn.textContent = o; } };
+
+/* ---------------- views ---------------- */
+function show(v) {
+  $('view-lib').classList.toggle('hidden', v !== 'lib'); $('view-set').classList.toggle('hidden', v !== 'set');
+  $('nav-lib').classList.toggle('on', v === 'lib'); $('nav-set').classList.toggle('on', v === 'set');
+  if (v === 'set') loadConfig();
+}
+$('nav-lib').onclick = () => show('lib'); $('nav-set').onclick = () => show('set');
+
+/* ---------------- library / search ---------------- */
+let offset = 0, total = 0, timer;
+const params = () => { const p = new URLSearchParams();
+  for (const k of ['q','type','library','source']) if ($(k).value) p.set(k, $(k).value); return p; };
 async function load() {
   const p = params(); p.set('limit', PAGE); p.set('offset', offset);
-  const r = await (await fetch('/api/search?' + p)).json();
-  total = r.total;
+  const r = await api('/api/search?' + p); total = r.total;
   $('rows').innerHTML = r.items.length ? r.items.map(i => `
     <tr><td>${esc(i.title)}<div class="path">${esc(i.path)}</div></td><td>${esc(i.year)}</td>
     <td><span class="tag">${esc(i.type)}</span></td><td>${esc(i.library)}</td><td>${esc(i.source)}</td></tr>`).join('')
-    : '<tr><td colspan="5" class="msg">No results. Configure a source and press “Sync now”.</td></tr>';
+    : '<tr><td colspan="5" class="msg">Nothing here yet. Open <b>Settings</b> to connect Jellyfin or a NAS, then press “Sync now”.</td></tr>';
   $('count').textContent = total ? `${offset + 1}–${Math.min(offset + PAGE, total)} of ${total}` : '';
   $('prev').disabled = offset === 0; $('next').disabled = offset + PAGE >= total;
 }
 async function loadMeta() {
-  const [s, libs] = await Promise.all([fetch('/api/stats').then(r => r.json()), fetch('/api/libraries').then(r => r.json())]);
-  $('stats').textContent = `${s.total} titles · ` + Object.entries(s.by_type).map(([k, v]) => `${v} ${k}`).join(' · ');
-  const cur = $('library').value;
-  $('library').innerHTML = '<option value="">All libraries</option>' +
-    [...new Set(libs.map(l => l.library))].map(l => `<option ${l === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+  const [s, libs] = await Promise.all([api('/api/stats'), api('/api/libraries')]);
+  $('stats').textContent = s.total ? `${s.total} titles · ` + Object.entries(s.by_type).map(([k, v]) => `${v} ${k}`).join(' · ') : '';
+  const fill = (id, vals, label) => { const cur = $(id).value;
+    $(id).innerHTML = `<option value="">${label}</option>` + vals.map(v => `<option ${v === cur ? 'selected' : ''}>${esc(v)}</option>`).join(''); };
+  fill('library', [...new Set(libs.map(l => l.library))], 'All libraries');
+  fill('source', [...new Set(libs.map(l => l.source))], 'All sources');
 }
 const refresh = () => { offset = 0; load(); };
 $('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(refresh, 200); });
@@ -82,15 +189,97 @@ $('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout
 $('prev').onclick = () => { offset = Math.max(0, offset - PAGE); load(); };
 $('next').onclick = () => { offset += PAGE; load(); };
 $('export').onclick = () => { const p = params(); p.set('format', $('fmt').value); location.href = '/api/export?' + p; };
-$('sync').onclick = async () => {
-  $('sync').disabled = true; $('sync').textContent = 'Syncing…';
-  await fetch('/api/sync', { method: 'POST' });
-  while ((await (await fetch('/api/sync/status')).json()).running) await new Promise(r => setTimeout(r, 1000));
-  const st = await (await fetch('/api/sync/status')).json();
-  if (Object.keys(st.errors).length) alert('Sync errors:\n' + Object.entries(st.errors).map(([k, v]) => `${k}: ${v}`).join('\n'));
-  $('sync').disabled = false; $('sync').textContent = 'Sync now';
+$('sync').onclick = () => busy($('sync'), 'Syncing…', async () => {
+  await api('/api/sync', {});
+  let st; do { await new Promise(r => setTimeout(r, 1000)); st = await api('/api/sync/status'); } while (st.running);
+  if (Object.keys(st.errors).length) alert('Sync problems:\n' + Object.entries(st.errors).map(([k, v]) => `${k}: ${v}`).join('\n'));
   await loadMeta(); refresh();
-};
+});
+
+/* ---------------- settings: Jellyfin ---------------- */
+async function loadConfig() {
+  const c = await api('/api/config');
+  $('jf-current').innerHTML = c.jellyfin
+    ? `<span class="ok">● Connected:</span> <b>${esc(c.jellyfin.name)}</b> <span class="mut">${esc(c.jellyfin.url)}</span> <button class="danger" id="jf-off">Disconnect</button>`
+    : '<span class="mut">Not connected</span>';
+  if ($('jf-off')) $('jf-off').onclick = async () => { await api('/api/jellyfin', undefined, 'DELETE'); loadConfig(); };
+  $('src-list').innerHTML = c.sources.length ? c.sources.map(s => `
+    <div class="src"><div><b>${esc(s.label)}</b> <span class="tag">${s.type === 'smb' ? 'SMB' : 'folder'}</span>
+      <span class="tag">${s.mode === 'library' ? 'single library' : 'contains libraries'}</span>
+      <div class="path">${esc(s.type === 'smb' ? `smb://${s.host}/${s.share}${s.path === '/' ? '' : s.path}` : s.path)}</div></div>
+      <button class="danger" data-rm="${s.id}">Remove</button></div>`).join('')
+    : '<div class="mut">No folders added yet.</div>';
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('/api/sources/' + b.dataset.rm, undefined, 'DELETE'); loadConfig(); });
+  $('interval').value = String(c.sync_interval_minutes);
+  if (!$('smb-cidr').value || !$('jf-cidr').value) {
+    const { subnets } = await api('/api/discover/subnets');
+    if (subnets[0]) { $('smb-cidr').value ||= subnets[0]; $('jf-cidr').placeholder = `Optional: also scan range, e.g. ${subnets[0]}`; }
+  }
+}
+function chips(el, items, label, pick) {
+  el.innerHTML = items.length ? '' : '<span class="mut">None found.</span>';
+  items.forEach(i => { const b = document.createElement('button'); b.className = 'chip'; b.textContent = label(i);
+    b.onclick = () => { el.querySelectorAll('.chip').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); pick(i); }; el.append(b); });
+}
+$('jf-scan').onclick = () => busy($('jf-scan'), 'Searching…', async () => {
+  try {
+    const cidr = $('jf-cidr').value.trim();
+    const { servers } = await api('/api/discover/jellyfin' + (cidr ? '?cidr=' + encodeURIComponent(cidr) : ''));
+    chips($('jf-found'), servers, s => `${s.name} — ${s.url}`, s => $('jf-url').value = s.url);
+    if (!servers.length) $('jf-found').innerHTML = '<span class="mut">No servers found. In Docker, broadcast discovery needs host networking; otherwise enter a range to scan, or type the address below.</span>';
+  } catch (e) { say($('jf-found'), e.message, 'err'); }
+});
+$('jf-save').onclick = () => busy($('jf-save'), 'Connecting…', async () => {
+  try {
+    const r = await api('/api/jellyfin/connect', { url: $('jf-url').value, api_key: $('jf-key').value, username: $('jf-user').value, password: $('jf-pass').value });
+    say($('jf-msg'), `Connected to ${r.name} ${r.version || ''}`, 'ok'); $('jf-pass').value = ''; $('jf-key').value = ''; loadConfig();
+  } catch (e) { say($('jf-msg'), e.message, 'err'); }
+});
+
+/* ---------------- settings: folders / NAS ---------------- */
+let pick = { kind: 'smb', share: '', path: '' };
+const stype = () => document.querySelector('input[name=stype]:checked').value;
+const smbCreds = () => ({ host: $('smb-host').value.trim(), username: $('smb-user').value, password: $('smb-pass').value, domain: $('smb-domain').value });
+document.querySelectorAll('input[name=stype]').forEach(r => r.onchange = () => {
+  $('smb-box').classList.toggle('hidden', stype() !== 'smb'); $('browse-box').classList.add('hidden'); $('add-box').classList.add('hidden');
+  if (stype() === 'local') openDir('');
+});
+$('smb-scan').onclick = () => busy($('smb-scan'), 'Scanning…', async () => {
+  try { const { hosts } = await api('/api/discover/smb?cidr=' + encodeURIComponent($('smb-cidr').value.trim()));
+    chips($('smb-found'), hosts, h => h.name ? `${h.name} (${h.ip})` : h.ip, h => $('smb-host').value = h.ip);
+  } catch (e) { say($('smb-found'), e.message, 'err'); }
+});
+$('smb-connect').onclick = () => busy($('smb-connect'), 'Connecting…', async () => {
+  try { const { shares } = await api('/api/smb/shares', smbCreds());
+    chips($('smb-shares'), shares, s => '📁 ' + s, s => { pick = { kind: 'smb', share: s, path: '/' }; openDir('/'); });
+    say($('src-msg'), shares.length ? 'Connected. Choose a share:' : 'Connected, but no shares are visible to this account.', 'ok');
+  } catch (e) { say($('src-msg'), e.message, 'err'); }
+});
+async function openDir(path) {
+  try {
+    const r = pick.kind === 'smb' && stype() === 'smb'
+      ? await api('/api/smb/browse', { ...smbCreds(), share: pick.share, path })
+      : await api('/api/fs/browse?path=' + encodeURIComponent(path));
+    pick.path = r.path; pick.kind = stype();
+    $('browse-path').textContent = stype() === 'smb' ? `\\\\${$('smb-host').value}\\${pick.share}${r.path === '/' ? '' : r.path.replaceAll('/', '\\')}` : r.path;
+    const list = $('browse-list'); list.innerHTML = '';
+    const add = (label, target) => { const d = document.createElement('div'); d.textContent = label; d.onclick = () => openDir(target); list.append(d); };
+    if (r.parent !== null && r.parent !== undefined) add('⬆ ..', r.parent);
+    r.dirs.forEach(d => add('📁 ' + d, (r.path === '/' ? '' : r.path) + '/' + d));
+    if (!r.dirs.length) list.insertAdjacentHTML('beforeend', '<div class="mut" style="cursor:default">No sub-folders</div>');
+    $('browse-box').classList.remove('hidden'); $('add-box').classList.remove('hidden'); say($('src-msg'), '');
+  } catch (e) { say($('src-msg'), e.message, 'err'); }
+}
+$('add-btn').onclick = () => busy($('add-btn'), 'Adding…', async () => {
+  try {
+    const body = { type: stype(), path: pick.path, label: $('add-label').value, mode: $('add-single').checked ? 'library' : 'root', hint: $('add-hint').value };
+    if (stype() === 'smb') Object.assign(body, smbCreds(), { share: pick.share });
+    await api('/api/sources', body);
+    say($('add-msg'), 'Added — press “Sync now” to index it.', 'ok'); $('add-label').value = ''; loadConfig();
+  } catch (e) { say($('add-msg'), e.message, 'err'); }
+});
+$('interval').onchange = async () => { await api('/api/config/interval', { minutes: +$('interval').value }, 'PUT'); say($('int-msg'), 'Saved'); setTimeout(() => say($('int-msg'), ''), 1500); };
+
 loadMeta(); load();
 </script>
 </body>
