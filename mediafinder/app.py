@@ -7,6 +7,7 @@ import io
 import json
 import os
 import ipaddress
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import compare as cmp
-from . import db
+from . import db, identify
 from .config import ConfigStore, Settings, load_settings, make_source
 from .security import MIN_PASSWORD, SESSION_DAYS, Auth
 from .sources import discovery, folder, jellyfin, smb
@@ -61,6 +62,20 @@ class NewSource(BaseModel):
 
 class Interval(BaseModel):
     minutes: int
+
+
+class TmdbKey(BaseModel):
+    api_key: str
+
+
+class ItemEdit(BaseModel):
+    title: str | None = None
+    year: int | None = None
+    type: str | None = None
+    tmdb_id: str | None = None
+    imdb_id: str | None = None
+    tvdb_id: str | None = None
+    ignore: bool = False
 
 
 class Login(BaseModel):
@@ -306,13 +321,130 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------- configuration ----------
     @app.get("/api/config")
     def get_config():
-        return store.public()
+        c = conn()
+        try:
+            counts = identify.match_counts(c)
+        finally:
+            c.close()
+        return {**store.public(), "identify": counts}
 
     @app.put("/api/config/interval")
     def set_interval(body: Interval):
         mins = max(0, min(body.minutes, 7 * 24 * 60))
         store.mutate(lambda d: d.__setitem__("sync_interval_minutes", mins))
         return {"sync_interval_minutes": mins}
+
+    # ---------- TMDB ----------
+    @app.post("/api/tmdb")
+    def tmdb_connect(body: TmdbKey):
+        key = body.api_key.strip()
+        if not key:
+            raise HTTPException(400, "Paste your TMDB API key")
+        try:
+            identify.Tmdb(key, settings.db_path).check_key()
+        except identify.TmdbAuthError:
+            raise HTTPException(401, "TMDB rejected that key")
+        except (identify.TmdbError, httpx.HTTPError) as e:
+            raise HTTPException(502, f"Could not reach TMDB: {e}")
+        store.mutate(lambda d: d.__setitem__("tmdb", {"api_key": key}))
+        return {"ok": True}
+
+    @app.delete("/api/tmdb")
+    def tmdb_disconnect():
+        store.mutate(lambda d: d.__setitem__("tmdb", None))
+        return {"ok": True}
+
+    @app.post("/api/identify/retry")
+    def identify_retry():
+        """Give items TMDB couldn't match another chance on the next sync."""
+        c = conn()
+        try:
+            with c:
+                n = c.execute("UPDATE items SET match_state='name' WHERE match_state='unmatched'").rowcount
+        finally:
+            c.close()
+        return {"requeued": n}
+
+    # ---------- manual corrections ----------
+    def base_key(key: str) -> str:
+        return re.sub(r"#\d+$", "", key)   # strip the suffix we add to duplicate keys
+
+    def reset_item(c, source: str, key: str) -> None:
+        with c:
+            c.execute("DELETE FROM overrides WHERE source=? AND key=?", (source, key))
+            c.execute("UPDATE items SET title=raw_title, year=raw_year, match_state='name',"
+                      " tmdb_id=NULL, imdb_id=NULL, tvdb_id=NULL WHERE source=?"
+                      " AND (key=? OR substr(key, 1, length(?) + 1) = ? || '#')",
+                      (source, key, key, key))
+
+    @app.put("/api/items/{item_id}")
+    def edit_item(item_id: int, body: ItemEdit):
+        """Correct a title (or hide it). Kept across syncs. Not available for Jellyfin items."""
+        c = conn()
+        try:
+            row = c.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "No such item")
+            if row["source"] == "jellyfin":
+                raise HTTPException(400, "Jellyfin items are identified by Jellyfin - fix them in Jellyfin")
+            key = base_key(row["key"])
+            if body.ignore:
+                with c:
+                    c.execute("INSERT OR REPLACE INTO overrides (source,key,title,year,type,ignored)"
+                              " VALUES (?,?,?,?,?,1)", (row["source"], key, row["title"], row["year"], row["type"]))
+                    c.execute("DELETE FROM items WHERE id=?", (item_id,))
+                return {"ok": True, "hidden": True}
+            title = (body.title or row["title"]).strip()
+            if not title:
+                raise HTTPException(400, "Title can't be empty")
+            if body.type and body.type not in ("movie", "series", "album", "other"):
+                raise HTTPException(400, "Unknown type")
+            if body.year is not None and not 1870 <= body.year <= 2100:
+                raise HTTPException(400, "Year looks wrong")
+            vals = (title, body.year, body.type or row["type"], body.tmdb_id or None, body.imdb_id or None,
+                    body.tvdb_id or None)
+            with c:
+                c.execute("INSERT OR REPLACE INTO overrides (source,key,title,year,type,tmdb_id,imdb_id,tvdb_id,ignored)"
+                          " VALUES (?,?,?,?,?,?,?,?,0)", (row["source"], key, *vals))
+                c.execute("UPDATE items SET title=?, year=?, type=?, tmdb_id=?, imdb_id=?, tvdb_id=?,"
+                          " match_state='manual' WHERE id=?", (*vals, item_id))
+            return {"ok": True}
+        finally:
+            c.close()
+
+    @app.get("/api/overrides")
+    def list_overrides():
+        c = conn()
+        try:
+            rows = c.execute("SELECT rowid AS id, source, key, title, year, type, ignored FROM overrides"
+                             " ORDER BY ignored DESC, title COLLATE NOCASE").fetchall()
+        finally:
+            c.close()
+        return [{**dict(r), "path": r["key"].split("\x1f", 1)[-1]} for r in rows]
+
+    @app.delete("/api/overrides/{override_id}")
+    def delete_override(override_id: int):
+        c = conn()
+        try:
+            r = c.execute("SELECT source, key FROM overrides WHERE rowid=?", (override_id,)).fetchone()
+            if not r:
+                raise HTTPException(404, "No such correction")
+            reset_item(c, r["source"], r["key"])
+        finally:
+            c.close()
+        return {"ok": True}
+
+    @app.delete("/api/items/{item_id}/override")
+    def reset_one(item_id: int):
+        c = conn()
+        try:
+            row = c.execute("SELECT source, key FROM items WHERE id=?", (item_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "No such item")
+            reset_item(c, row["source"], base_key(row["key"]))
+        finally:
+            c.close()
+        return {"ok": True}
 
     @app.post("/api/jellyfin/connect")
     def jellyfin_connect(body: JellyfinConnect):

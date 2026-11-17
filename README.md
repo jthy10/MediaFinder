@@ -14,6 +14,7 @@ Both sources can be enabled together. Titles are stored in a local SQLite databa
 - Export the title list as **CSV, plain text or JSON** (honours your current search/filters, de-duplicates titles found in both sources)
 - Manual "Sync now" button plus optional periodic re-sync, with live per-source progress and the result of the last run
 - Incremental syncs: only changed titles are written, so large libraries stay fast
+- Compare any two sources, identify titles via TMDB, correct or hide wrong matches
 - Single container, no external services
 
 ## Install
@@ -60,6 +61,22 @@ For each folder you choose whether it *contains* library folders (`Movies/`, `TV
 
 Then press **Sync now** (or set an automatic interval).
 
+### Compare sources
+The **Compare** tab shows what one source has that another doesn't, for example files on your NAS that Jellyfin hasn't picked up, or the reverse, and exports the differences as CSV. Titles are matched by TMDB / IMDb / TVDB id when known, otherwise by title and year (a Dune 1984 file won't match Dune 2021).
+
+### Better identification (optional TMDB key)
+File names are messy, so MediaFinder can look titles up on [TMDB](https://www.themoviedb.org/settings/api) (free key, **Settings → Title identification**). It fixes names and years (`scream 2022` becomes *Scream (2022)*), corrects movie-vs-series mix-ups and records TMDB/IMDb/TVDB ids, which makes comparing with Jellyfin exact. Lookups are cached, so repeat syncs are free.
+
+Ids you already put in names are used automatically and are the most reliable way to identify something. All of these work in file or folder names (Jellyfin/Sonarr/Radarr style):
+
+```
+The Matrix (1999) [tmdbid-603]/
+Breaking Bad {tvdb-81189}/Season 01/...
+Heat (1995) (imdbid=tt0113277).mkv        Heat.1995.tt0113277.mkv
+```
+
+Still wrong? Click ✎ next to any NAS/folder title to fix the title, year, type or ids, or to hide junk like samples and extras. Edits survive re-syncs and can be undone under **Settings → Corrections**.
+
 ### Networking note
 Broadcast discovery only reaches your LAN when the container uses **host networking** (the default in `docker-compose.yml`; the Proxmox LXC and systemd installs are on your LAN already). If you switch to a bridged network, discovery still works by scanning an IP range you type into the UI.
 
@@ -87,7 +104,9 @@ Settings (including NAS credentials and the Jellyfin token) are saved in `/data/
 | `POST /api/sync`, `GET /api/sync/status` | Trigger / check a sync |
 | `GET /api/discover/jellyfin`, `GET /api/discover/smb?cidr=` | Find servers / NAS hosts |
 | `POST /api/smb/shares`, `POST /api/smb/browse`, `GET /api/fs/browse` | Browse shares and folders |
-| `GET /api/config`, `POST /api/jellyfin/connect`, `POST/DELETE /api/sources` | Manage connections |
+| `GET /api/config`, `POST /api/jellyfin/connect`, `POST/DELETE /api/sources`, `POST/DELETE /api/tmdb` | Manage connections |
+| `GET /api/compare?a=&b=&format=json\|csv` | Titles only in A / only in B (`@folders`, `@jellyfin` or source labels) |
+| `PUT /api/items/{id}`, `GET /api/overrides`, `DELETE /api/overrides/{id}` | Correct, hide or restore titles |
 
 ## Security
 

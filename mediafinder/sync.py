@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import time
 
-from . import db
+from . import db, identify
 from .config import ConfigStore, Settings
 from .sources import folder, jellyfin, smb
 
@@ -23,13 +23,15 @@ class SyncManager:
 
     def source_keys(self) -> list[str]:
         c = self.store.snapshot()
-        return (["jellyfin"] if c["jellyfin"] else []) + [s["label"] for s in c["sources"]]
+        return ((["jellyfin"] if c["jellyfin"] else []) + [s["label"] for s in c["sources"]]
+                + (["TMDB"] if (c.get("tmdb") or {}).get("api_key") else []))
 
     def snapshot(self) -> dict:
         """Live progress merged with the persisted outcome of the previous runs."""
         conn = db.connect(self.settings.db_path)
         try:
             log = db.sync_log(conn)
+            counts = identify.match_counts(conn)
         finally:
             conn.close()
         sources = {}
@@ -42,8 +44,9 @@ class SyncManager:
                              added=last["added"], removed=last["removed"],
                              error=last["error"], finished=last["finished"])
             entry.update(self.live.get(key, {}))
+            entry["kind"] = "tmdb" if key == "TMDB" else "source"
             sources[key] = entry
-        return {"running": self.running, "last_run": self.last_run, "sources": sources,
+        return {"running": self.running, "last_run": self.last_run, "sources": sources, "identify": counts,
                 "errors": {k: v["error"] for k, v in sources.items() if v["error"]}}
 
     def run(self) -> bool:
@@ -61,9 +64,12 @@ class SyncManager:
                 scan = smb.scan_source if s["type"] == "smb" else folder.scan_source
                 jobs[s["label"]] = lambda cb, s=s, scan=scan: scan(s, cb)
             self.live = {k: {"state": "pending", "files": None, "error": None} for k in jobs}
+            tmdb_key = (cfg.get("tmdb") or {}).get("api_key")
+            if tmdb_key:
+                self.live["TMDB"] = {"state": "pending", "files": None, "error": None}
             conn = db.connect(self.settings.db_path)
             try:
-                db.prune_sources(conn, list(jobs))  # forget sources the user removed
+                db.prune_sources(conn, list(jobs) + (["TMDB"] if tmdb_key else []))  # forget removed sources
                 for key, fetch in jobs.items():
                     entry = self.live[key]
                     entry["state"] = "running"
@@ -76,6 +82,8 @@ class SyncManager:
                         msg = f"{type(e).__name__}: {e}"
                         entry.update(state="error", error=msg, finished=time.time())
                         db.log_sync(conn, key, None, msg)
+                if tmdb_key:
+                    self._identify(conn, tmdb_key)
             finally:
                 conn.close()
             self.last_run = time.time()
@@ -83,3 +91,19 @@ class SyncManager:
         finally:
             self.running = False
             self._lock.release()
+
+    def _identify(self, conn, api_key: str) -> None:
+        """Look up the folder/NAS items that haven't been identified yet on TMDB."""
+        entry = self.live["TMDB"]
+        entry["state"] = "running"
+        try:
+            tmdb = identify.Tmdb(api_key, self.settings.db_path)
+            stats = identify.identify_all(conn, tmdb, lambda done, total: entry.update(files=done, of=total))
+            entry.update(state="done", error=None, finished=time.time(), total=stats["matched"],
+                         added=stats["matched"], removed=0)
+            db.log_sync(conn, "TMDB", {"total": stats["matched"], "added": stats["matched"],
+                                       "updated": 0, "removed": 0}, None)
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            entry.update(state="error", error=msg, finished=time.time())
+            db.log_sync(conn, "TMDB", None, msg)

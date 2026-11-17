@@ -362,3 +362,145 @@ def test_compare_api_and_csv(tmp_path):
         assert r["a_total"] == 3 and r["b_total"] == 1 and r["both"] == 0 and len(r["only_b"]) == 1
         body = c.get("/api/compare", params={"a": "A", "b": "B", "format": "csv"}).text
         assert "only in A" in body and "only in B" in body and "Breaking Bad" in body
+
+
+# ---------------- TMDB identification + corrections ----------------
+from mediafinder import identify
+
+
+def fake_tmdb(tmp_path):
+    calls = []
+
+    def handler(req: httpx.Request):
+        calls.append(req.url.path)
+        path, q = req.url.path.replace("/3", "", 1), dict(req.url.params)
+        assert q.get("api_key") == "KEY"
+        if path == "/configuration":
+            return httpx.Response(200, json={})
+        if path == "/movie/603":
+            return httpx.Response(200, json={"id": 603, "title": "The Matrix", "release_date": "1999-03-30",
+                                             "external_ids": {"imdb_id": "tt0133093"}})
+        if path == "/tv/1396":
+            return httpx.Response(200, json={"id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20",
+                                             "external_ids": {"imdb_id": "tt0903747", "tvdb_id": 81189}})
+        if path == "/find/81189":
+            return httpx.Response(200, json={"tv_results": [{"id": 1396}], "movie_results": []})
+        if path == "/search/movie":
+            if q["query"].lower().startswith("scream"):
+                return httpx.Response(200, json={"results": [{"id": 4, "title": "Scream", "release_date": "2022-01-11"}]})
+            return httpx.Response(200, json={"results": []})
+        if path == "/movie/4":
+            return httpx.Response(200, json={"id": 4, "title": "Scream", "release_date": "2022-01-11",
+                                             "external_ids": {"imdb_id": "tt11245972"}})
+        if path == "/search/tv":
+            if "bad" in q["query"].lower():
+                return httpx.Response(200, json={"results": [{"id": 1396, "name": "Breaking Bad",
+                                                              "first_air_date": "2008-01-20"}]})
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(404, json={})
+
+    db_path = str(tmp_path / "tm.db")
+    db.connect(db_path).close()
+    return identify.Tmdb("KEY", db_path, httpx.Client(transport=httpx.MockTransport(handler))), calls
+
+
+def test_tmdb_lookup_paths(tmp_path):
+    tm, calls = fake_tmdb(tmp_path)
+    row = lambda **kw: {"type": "movie", "title": "x", "year": None, "tmdb_id": None,
+                        "imdb_id": None, "tvdb_id": None, **kw}
+    assert tm.lookup(row(tmdb_id="603"))["title"] == "The Matrix"                  # by tmdb id
+    hit = tm.lookup(row(type="series", tvdb_id="81189"))                            # tvdb id -> /find
+    assert hit["title"] == "Breaking Bad" and hit["tvdb_id"] == "81189" and hit["type"] == "series"
+    hit = tm.lookup(row(title="scream", year=2022))                                 # search, canonical casing
+    assert (hit["title"], hit["year"], hit["imdb_id"]) == ("Scream", 2022, "tt11245972")
+    hit = tm.lookup(row(title="Breaking Bad"))                                      # typed movie, really a series
+    assert hit["type"] == "series" and hit["tmdb_id"] == "1396"
+    assert tm.lookup(row(title="Zzzz Nothing")) is None
+    n = len(calls)
+    tm.lookup(row(tmdb_id="603"))
+    assert len(calls) == n                                                          # served from cache
+
+
+def test_identify_all_and_rescan_keeps_identification(tmp_path):
+    tm, _ = fake_tmdb(tmp_path)
+    conn = db.connect(str(tmp_path / "tm.db"))
+    scan = lambda: [db.Item("n", "Movies", "movie", "scream", 2022, "/m/scream 2022.mkv"),
+                    db.Item("n", "Movies", "movie", "Zzzz", None, "/m/zzzz.mkv"),
+                    db.Item("n", "TV", "series", "Breaking Bad", None, "/tv/bb", tvdb_id="81189")]
+    db.replace_source(conn, "n", scan())
+    stats = identify.identify_all(conn, tm)
+    assert stats == {"checked": 3, "matched": 2, "unmatched": 1}
+    names = {r["raw_title"]: r for r in conn.execute("SELECT * FROM items")}
+    assert names["scream"]["title"] == "Scream" and names["scream"]["match_state"] == "tmdb"
+    assert names["Breaking Bad"]["tmdb_id"] == "1396" and names["Zzzz"]["match_state"] == "unmatched"
+    r = db.replace_source(conn, "n", scan())                    # re-scan: nothing to change
+    assert (r["added"], r["updated"], r["removed"]) == (0, 0, 0)
+    assert conn.execute("SELECT title FROM items WHERE raw_title='scream'").fetchone()[0] == "Scream"
+    assert identify.identify_all(conn, tm)["checked"] == 0      # nothing left to look up
+    assert identify.match_counts(conn) == {"identified": 2, "edited": 0, "unmatched": 1, "pending": 0}
+
+
+def test_overrides_survive_rescan_and_can_hide():
+    conn = db.connect(":memory:")
+    it = db.Item("n", "Movies", "series", "Wrong Show", 2001, "/m/wrong")
+    junk = db.Item("n", "Movies", "movie", "Sample", None, "/m/sample")
+    db.replace_source(conn, "n", [it, junk])
+    conn.execute("INSERT INTO overrides (source,key,title,year,type,ignored) VALUES ('n',?,?,?,?,0)",
+                 (it.key, "Right Movie", 2001, "movie"))
+    conn.execute("INSERT INTO overrides (source,key,title,ignored) VALUES ('n',?,?,1)", (junk.key, "Sample"))
+    conn.commit()
+    r = db.replace_source(conn, "n", [it, junk])
+    assert r["total"] == 1 and r["removed"] == 1
+    row = conn.execute("SELECT * FROM items").fetchone()
+    assert (row["title"], row["type"], row["match_state"], row["raw_title"]) == (
+        "Right Movie", "movie", "manual", "Wrong Show")
+
+
+def wait_sync(c):
+    time.sleep(0.2)
+    for _ in range(150):
+        if not c.get("/api/sync/status").json()["running"]:
+            return
+        time.sleep(0.1)
+
+
+def test_correction_and_tmdb_endpoints(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    cfg_dir = tmp_path.parent / (tmp_path.name + "_db")
+    s = Settings(db_path=str(cfg_dir / "t.db"), sync_on_start=False, browse_roots=["*"])
+    monkeypatch.setattr(identify.Tmdb, "check_key", lambda self: None)
+    with TestClient(create_app(s)) as c:
+        c.post("/api/sources", json={"type": "local", "path": str(tmp_path / "Movies"),
+                                     "label": "M", "mode": "library"})
+        c.post("/api/sync")
+        wait_sync(c)
+        items = c.get("/api/search", params={"q": "matrix"}).json()["items"]
+        assert len(items) == 1 and items[0]["match_state"] == "name"
+        iid = items[0]["id"]
+        assert c.put(f"/api/items/{iid}", json={"title": "The Matrix Reloaded", "year": 1}).status_code == 400
+        assert c.put(f"/api/items/{iid}", json={"title": "The Matrix Reloaded", "year": 2003,
+                                                "tmdb_id": "604"}).status_code == 200
+        got = c.get("/api/search", params={"q": "reloaded"}).json()["items"][0]
+        assert (got["year"], got["tmdb_id"], got["match_state"]) == (2003, "604", "manual")
+        assert c.get("/api/config").json()["identify"]["edited"] == 1
+        c.post("/api/sync")
+        wait_sync(c)
+        assert c.get("/api/search", params={"q": "reloaded"}).json()["total"] == 1   # survived the re-scan
+        ov = c.get("/api/overrides").json()
+        assert len(ov) == 1 and ov[0]["title"] == "The Matrix Reloaded"
+        assert c.delete(f"/api/overrides/{ov[0]['id']}").status_code == 200          # undo
+        assert c.get("/api/search", params={"q": "matrix"}).json()["items"][0]["match_state"] == "name"
+        assert c.put(f"/api/items/{iid}", json={"ignore": True}).json()["hidden"] is True   # hide junk
+        assert c.get("/api/search", params={"q": "matrix"}).json()["total"] == 0
+        # Jellyfin items can't be edited here
+        dbc = db.connect(s.db_path)
+        db.replace_source(dbc, "jellyfin", [db.Item("jellyfin", "Films", "movie", "Zorro", 1975,
+                                                    match_state="jellyfin")])
+        dbc.close()
+        jid = c.get("/api/search", params={"q": "zorro"}).json()["items"][0]["id"]
+        assert c.put(f"/api/items/{jid}", json={"title": "x"}).status_code == 400
+        # TMDB key: saved encrypted, removable
+        assert c.post("/api/tmdb", json={"api_key": "abc123secret"}).status_code == 200
+        assert c.get("/api/config").json()["tmdb"] is True
+        assert "abc123secret" not in (cfg_dir / "config.json").read_text()
+        assert c.delete("/api/tmdb").status_code == 200 and c.get("/api/config").json()["tmdb"] is False

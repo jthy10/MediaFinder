@@ -38,6 +38,10 @@
   .src { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bd); }
   .src:last-child { border-bottom:0; }
   .hidden { display:none !important; }
+  dialog { background:var(--card); color:var(--fg); border:1px solid var(--bd); border-radius:12px; padding:1.2rem; width:min(480px,92vw); }
+  dialog::backdrop { background:#0009; }
+  .editbtn { cursor:pointer; background:none; padding:.1rem .4rem; } .editbtn:hover { border-color:var(--acc); color:var(--fg); }
+  .tag.ok { color:var(--ok); border-color:var(--ok); } .tag.warn { color:#e0a030; border-color:#e0a030; }
   .two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:1.2rem; }
   .two-col .card { margin:0; overflow:auto; max-height:70vh; }
   .li { padding:.4rem 0; border-bottom:1px solid var(--bd); } .li:last-child { border-bottom:0; }
@@ -161,6 +165,20 @@
     <div id="src-msg"></div>
   </div>
 
+  <div class="card" id="tmdb-card">
+    <h2>Title identification (TMDB)</h2>
+    <div class="hint" style="margin-bottom:.6rem">Optional but recommended. Looks up your NAS/folder titles on <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">TMDB</a> (free API key) to fix names like <i>scream 2022</i>, and to get TMDB / IMDb / TVDB ids so comparing with Jellyfin is exact. Ids in names such as <code>[tmdbid-603]</code> or <code>{tvdb-81189}</code> are used automatically.</div>
+    <div id="tmdb-current" class="row"></div>
+    <div class="row"><input id="tmdb-key" class="grow" type="password" placeholder="TMDB API key (v3) or read access token" autocomplete="off">
+      <button class="primary" id="tmdb-save">Save &amp; identify</button><span id="tmdb-msg"></span></div>
+    <div id="tmdb-counts" class="hint"></div>
+  </div>
+
+  <div class="card" id="fix-card">
+    <h2>Corrections</h2>
+    <div id="fix-list" class="mut">None yet. Use ✎ on a title in the Library to fix or hide it.</div>
+  </div>
+
   <div class="card" id="sec-card">
     <h2>Security</h2>
     <div id="sec-state" class="mut"></div>
@@ -184,6 +202,16 @@
   </div>
 </main>
 
+<dialog id="edit-dlg">
+  <h2>Edit title</h2>
+  <div class="hint" id="ed-raw" style="margin-bottom:.6rem"></div>
+  <div class="row"><input id="ed-title" class="grow" placeholder="Title"><input id="ed-year" type="number" placeholder="Year" style="width:90px">
+    <select id="ed-type"><option value="movie">Movie</option><option value="series">Series</option><option value="album">Album</option><option value="other">Other</option></select></div>
+  <div class="row"><input id="ed-tmdb" class="grow" placeholder="TMDB id"><input id="ed-imdb" class="grow" placeholder="IMDb id (tt…)"><input id="ed-tvdb" class="grow" placeholder="TVDB id"></div>
+  <div class="row"><button class="primary" id="ed-save">Save</button><button id="ed-reset" class="hidden">Undo my edit</button>
+    <button id="ed-hide" class="danger">Hide this item</button><button id="ed-cancel">Cancel</button><span id="ed-msg"></span></div>
+  <div class="hint">Edits are remembered across syncs. “Hide” removes things that aren't real titles (samples, extras); you can bring them back from Settings.</div>
+</dialog>
 <script>
 const $ = id => document.getElementById(id), PAGE = 50;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -213,14 +241,18 @@ function show(v) {
 $('nav-lib').onclick = () => show('lib'); $('nav-set').onclick = () => show('set'); $('nav-cmp').onclick = () => show('cmp');
 
 /* ---------------- library / search ---------------- */
-let offset = 0, total = 0, timer;
+let offset = 0, total = 0, timer, rowsById = {};
+const stateTag = i => ({ tmdb: '<span class="tag ok" title="Identified via TMDB">TMDB ✓</span>', manual: '<span class="tag" title="You edited this">edited</span>',
+  unmatched: '<span class="tag warn" title="Not found on TMDB: check the name or edit it">?</span>' }[i.match_state] || '');
+const idLine = i => [i.tmdb_id && 'tmdb ' + i.tmdb_id, i.imdb_id, i.tvdb_id && 'tvdb ' + i.tvdb_id].filter(Boolean).map(esc).join(' · ');
 const params = () => { const p = new URLSearchParams();
   for (const k of ['q','type','library','source']) if ($(k).value) p.set(k, $(k).value); return p; };
 async function load() {
   const p = params(); p.set('limit', PAGE); p.set('offset', offset);
-  const r = await api('/api/search?' + p); total = r.total;
+  const r = await api('/api/search?' + p); total = r.total; rowsById = {}; r.items.forEach(i => rowsById[i.id] = i);
   $('rows').innerHTML = r.items.length ? r.items.map(i => `
-    <tr><td>${esc(i.title)}<div class="path">${esc(i.path)}</div></td><td>${esc(i.year)}</td>
+    <tr><td>${esc(i.title)} ${stateTag(i)} ${i.source !== 'jellyfin' ? `<button class="tag editbtn" data-edit="${i.id}" title="Fix title / hide">✎</button>` : ''}
+      <div class="path">${esc(i.path)}</div><div class="path">${idLine(i)}</div></td><td>${esc(i.year)}</td>
     <td><span class="tag">${esc(i.type)}</span></td><td>${esc(i.library)}</td><td>${esc(i.source)}</td></tr>`).join('')
     : '<tr><td colspan="5" class="msg">Nothing here yet. Open <b>Settings</b> to connect Jellyfin or a NAS, then press “Sync now”.</td></tr>';
   $('count').textContent = total ? `${offset + 1}–${Math.min(offset + PAGE, total)} of ${total}` : '';
@@ -245,6 +277,12 @@ const ago = ts => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 90
 const n = v => (v ?? 0).toLocaleString();
 function srcStatus(s) {
   if (!s) return '';
+  if (s.kind === 'tmdb') {
+    if (s.state === 'running') return `<span class="mut">⏳ looking up titles — ${n(s.files)}${s.of ? ' / ' + n(s.of) : ''}</span>`;
+    if (s.state === 'error') return `<span class="err">✗ ${esc(s.error)}</span>`;
+    if (s.state === 'done') return `<span class="ok">✓ identified ${n(s.total)} new</span> <span class="mut">· ${ago(s.finished)}</span>`;
+    return s.state === 'pending' ? '<span class="mut">⏳ waiting…</span>' : '<span class="mut">Runs after the next sync</span>';
+  }
   if (s.state === 'pending') return '<span class="mut">⏳ waiting…</span>';
   if (s.state === 'running') return `<span class="mut">⏳ scanning${s.files ? ' — ' + n(s.files) + ' ' + (s.files_label || 'items so far') : '…'}</span>`;
   if (s.state === 'error') return `<span class="err">✗ ${esc(s.error)}</span>`;
@@ -263,7 +301,7 @@ function renderSyncBar(st, finished) {
     bar.innerHTML = `<span>${bad.map(([k, s]) => `<b>${esc(k)}</b>: <span class="err">${esc(s.error)}</span>`).join('<br>')}<br><span class="mut">The previous results for these sources were kept.</span></span><button id="syncbar-x">Dismiss</button>`;
     $('syncbar-x').onclick = () => bar.classList.add('hidden');
   } else if (finished) {
-    const add = entries.reduce((a, [, s]) => a + (s.added || 0), 0), rem = entries.reduce((a, [, s]) => a + (s.removed || 0), 0);
+    const lib = entries.filter(([, s]) => s.kind !== 'tmdb'), add = lib.reduce((a, [, s]) => a + (s.added || 0), 0), rem = lib.reduce((a, [, s]) => a + (s.removed || 0), 0);
     bar.className = 'syncbar';
     bar.innerHTML = `<span class="ok">✓ Sync finished — ${add ? '+' + n(add) + ' new' : 'no new titles'}${rem ? ', −' + n(rem) + ' removed' : ''}</span>`;
     setTimeout(() => bar.classList.add('hidden'), 6000);
@@ -290,7 +328,7 @@ async function loadConfig() {
     ? `<span class="ok">● Connected:</span> <b>${esc(c.jellyfin.name)}</b> <span class="mut">${esc(c.jellyfin.url)}</span> <button class="danger" id="jf-off">Disconnect</button>`
     : '<span class="mut">Not connected</span>';
   if ($('jf-off')) $('jf-off').onclick = async () => { await api('/api/jellyfin', undefined, 'DELETE'); loadConfig(); };
-  lastCfg = c; lastSync = await api('/api/sync/status'); renderSources();
+  lastCfg = c; lastSync = await api('/api/sync/status'); renderSources(); renderCorrections();
   $('interval').value = String(c.sync_interval_minutes);
   if (!$('smb-cidr').value || !$('jf-cidr').value) {
     const { subnets } = await api('/api/discover/subnets');
@@ -299,6 +337,7 @@ async function loadConfig() {
 }
 function renderSources() {
   if (!lastCfg) return;
+  renderTmdb();
   const st = (lastSync || { sources: {} }).sources;
   $('jf-status').innerHTML = lastCfg.jellyfin ? srcStatus(st['jellyfin']) : '';
   $('src-list').innerHTML = lastCfg.sources.length ? lastCfg.sources.map(s => `
@@ -374,6 +413,47 @@ $('add-btn').onclick = () => busy($('add-btn'), 'Adding…', async () => {
   } catch (e) { say($('add-msg'), e.message, 'err'); }
 });
 $('interval').onchange = async () => { await api('/api/config/interval', { minutes: +$('interval').value }, 'PUT'); say($('int-msg'), 'Saved'); setTimeout(() => say($('int-msg'), ''), 1500); };
+
+/* ---------------- edit / corrections ---------------- */
+let editing = null;
+document.addEventListener('click', e => { const b = e.target.closest('[data-edit]'); if (b) openEdit(+b.dataset.edit); });
+function openEdit(id) {
+  const i = editing = rowsById[id]; if (!i) return;
+  $('ed-title').value = i.title; $('ed-year').value = i.year || ''; $('ed-type').value = i.type;
+  $('ed-tmdb').value = i.tmdb_id || ''; $('ed-imdb').value = i.imdb_id || ''; $('ed-tvdb').value = i.tvdb_id || '';
+  $('ed-raw').textContent = `Detected from the file name: ${i.raw_title || i.title}${i.raw_year ? ' (' + i.raw_year + ')' : ''}`;
+  $('ed-reset').classList.toggle('hidden', i.match_state !== 'manual'); say($('ed-msg'), ''); $('edit-dlg').showModal();
+}
+const afterEdit = async () => { $('edit-dlg').close(); await loadMeta(); await load(); if (!$('view-set').classList.contains('hidden')) loadConfig(); };
+$('ed-cancel').onclick = () => $('edit-dlg').close();
+$('ed-save').onclick = async () => { try { await api('/api/items/' + editing.id, { title: $('ed-title').value, year: $('ed-year').value ? +$('ed-year').value : null,
+  type: $('ed-type').value, tmdb_id: $('ed-tmdb').value.trim(), imdb_id: $('ed-imdb').value.trim(), tvdb_id: $('ed-tvdb').value.trim() }, 'PUT'); afterEdit(); } catch (e) { say($('ed-msg'), e.message, 'err'); } };
+$('ed-hide').onclick = async () => { try { await api('/api/items/' + editing.id, { ignore: true }, 'PUT'); afterEdit(); } catch (e) { say($('ed-msg'), e.message, 'err'); } };
+$('ed-reset').onclick = async () => { try { await api('/api/items/' + editing.id + '/override', undefined, 'DELETE'); afterEdit(); } catch (e) { say($('ed-msg'), e.message, 'err'); } };
+
+async function renderCorrections() {
+  const list = await api('/api/overrides');
+  $('fix-list').className = list.length ? '' : 'mut';
+  $('fix-list').innerHTML = list.length ? list.map(o => `<div class="src"><div><b>${esc(o.title)}</b> ${o.year ? '(' + o.year + ')' : ''}
+    <span class="tag ${o.ignored ? 'warn' : ''}">${o.ignored ? 'hidden' : 'edited'}</span><div class="path">${esc(o.path)}</div></div>
+    <button data-undo="${o.id}">Undo</button></div>`).join('') : 'None yet. Use ✎ on a title in the Library to fix or hide it.';
+  document.querySelectorAll('[data-undo]').forEach(b => b.onclick = async () => { await api('/api/overrides/' + b.dataset.undo, undefined, 'DELETE'); renderCorrections(); loadMeta(); load(); });
+}
+function renderTmdb() {
+  if (!lastCfg) return;
+  const st = (lastSync || { sources: {} }).sources['TMDB'], c = lastCfg.identify || {};
+  $('tmdb-current').innerHTML = lastCfg.tmdb
+    ? `<span class="ok">● Connected</span> <span>${st ? srcStatus(st) : ''}</span> <button id="tmdb-off" class="danger">Remove key</button>`
+    : '<span class="mut">Not connected — titles are identified from file names only</span>';
+  $('tmdb-counts').innerHTML = (c.identified || c.unmatched || c.pending || c.edited)
+    ? `${n(c.identified)} identified · ${n(c.edited)} edited · ${n(c.unmatched)} not found${c.unmatched ? ' <button id="tmdb-retry">Retry not-found</button>' : ''} · ${n(c.pending)} waiting` : '';
+  if ($('tmdb-off')) $('tmdb-off').onclick = async () => { await api('/api/tmdb', undefined, 'DELETE'); loadConfig(); };
+  if ($('tmdb-retry')) $('tmdb-retry').onclick = async () => { await api('/api/identify/retry', {}); $('sync').click(); };
+}
+$('tmdb-save').onclick = () => busy($('tmdb-save'), 'Checking…', async () => {
+  try { await api('/api/tmdb', { api_key: $('tmdb-key').value }); $('tmdb-key').value = ''; say($('tmdb-msg'), 'Saved — identifying titles…', 'ok'); await loadConfig(); $('sync').click(); }
+  catch (e) { say($('tmdb-msg'), e.message, 'err'); }
+});
 
 /* ---------------- compare ---------------- */
 async function loadCompareOptions() {
