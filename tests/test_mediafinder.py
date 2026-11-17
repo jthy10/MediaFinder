@@ -71,7 +71,7 @@ def test_smb_walk_and_scan(monkeypatch):
     fake = FakeSmbclient(tree)
     monkeypatch.setattr(smb, "smbclient", fake)
     with smb.Session("nas", "me", "pw", "HOME") as s:
-        assert fake.registered[0] == "nas" and fake.registered[1]["username"] == "HOME\me"
+        assert fake.registered[0] == "nas" and fake.registered[1]["username"] == r"HOME\me"
         assert s.list_dirs("media", "/") == ["Movies", "TV"]          # @eaDir hidden
         paths = sorted(s.walk("media", "/"))
     assert paths == ["Movies/Alien (1979)/Alien (1979).mkv", "Movies/Alien (1979)/poster.jpg",
