@@ -2,7 +2,7 @@
 
 A small self-hosted dashboard that indexes your media library and lets you search it and export the title list. It runs in a Linux container and can read from:
 
-- **Jellyfin** – via its REST API (just needs a URL and an API key), and/or
+- **Jellyfin** – via its REST API (auto-discovered on your network; sign in with your account or an API key), and/or
 - **A NAS or folder** – connects over SMB (or reads a mounted folder) and scans files and identifies titles from naming conventions, the same way Jellyfin does (`Movie (2010)/Movie (2010).mkv`, `Show/Season 01/S01E01.mkv`). Parsing is done with [guessit](https://github.com/guessit-io/guessit), so messy release-style names work too.
 
 Both sources can be enabled together. Titles are stored in a local SQLite database with full-text (prefix) search.
