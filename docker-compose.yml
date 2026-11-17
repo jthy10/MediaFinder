@@ -1,16 +1,28 @@
 services:
   mediafinder:
-    build: .
+    image: ghcr.io/jthy10/mediafinder:latest
+    # build: .                      # uncomment to build from source instead of pulling
     container_name: mediafinder
     restart: unless-stopped
     # Host networking lets MediaFinder find Jellyfin servers on your LAN via broadcast
-    # (the same way Jellyfin's own apps do). It listens on port 8080 of the host.
-    # Prefer a bridged network? Remove `network_mode` and uncomment `ports` - discovery
-    # then works by scanning an IP range you enter in the UI instead of broadcast.
+    # (the same way Jellyfin's own apps do) and serves on port 8080 of the host.
+    # Prefer a bridged network? Remove `network_mode` and uncomment `ports`; discovery
+    # then works by scanning an IP range you enter in the UI.
     network_mode: host
     # ports:
     #   - "8080:8080"
+    environment:
+      # Strongly recommended - or set a password later in Settings > Security:
+      # MEDIAFINDER_PASSWORD: change-me-please
+      # Keeps the encryption key for stored credentials out of the data volume:
+      # MEDIAFINDER_SECRET_KEY: some-long-random-string
+      # Folders the in-app browser may show (mount your media under one of them):
+      BROWSE_ROOTS: /media,/mnt,/srv
     volumes:
-      - ./data:/data
-      # Optional: if you'd rather mount the NAS than connect over SMB:
+      - mediafinder-data:/data
+      # Optional: browse a NAS you've mounted on the host instead of using SMB.
+      # Files must be readable by uid 10001 (or add `user: "1000:1000"` above).
       # - /mnt/nas/media:/media:ro
+
+volumes:
+  mediafinder-data:

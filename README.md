@@ -15,13 +15,37 @@ Both sources can be enabled together. Titles are stored in a local SQLite databa
 - Manual "Sync now" button plus optional periodic re-sync
 - Single container, no external services
 
-## Quick start (Docker)
+## Install
+
+Pick whichever fits your homelab. All of them end at the same web UI on port **8080**.
+
+### Docker / Compose (Portainer, Unraid, TrueNAS, Synology, plain Docker)
+A multi-arch image (amd64 + arm64) is published to GitHub Container Registry on every release of `main`:
 
 ```sh
-docker compose up -d --build
+curl -O https://raw.githubusercontent.com/jthy10/MediaFinder/main/docker-compose.yml
+docker compose up -d
 ```
+Or just `docker run -d --network host -v mediafinder-data:/data ghcr.io/jthy10/mediafinder:latest`.
+The image runs as a non-root user, keeps its data in the `/data` volume, and has a healthcheck.
 
-Open <http://localhost:8080>, go to **Settings**, and set things up from the browser - no config files needed.
+### Proxmox (one command, run on the Proxmox host)
+Creates a small unprivileged Debian 12 LXC (1 core, 512 MB, 4 GB) and installs MediaFinder as a systemd service inside it:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/jthy10/MediaFinder/main/deploy/proxmox-lxc.sh)"
+```
+Tweak with `CTID`, `STORAGE`, `BRIDGE`, `MEMORY`, `DISK_GB`. Give the container a DHCP reservation so the address stays put.
+
+### Any Debian/Ubuntu box, VM or existing LXC (no Docker)
+```sh
+curl -fsSL https://raw.githubusercontent.com/jthy10/MediaFinder/main/deploy/install.sh | sudo bash
+sudo bash /opt/mediafinder/deploy/install.sh update      # later: update in place
+```
+Config lives in `/etc/mediafinder.env`, data in `/var/lib/mediafinder`.
+
+### Then, in the browser
+Open `http://<host>:8080`, go to **Settings**, and set everything up there - no config files needed. Set a password first (Settings → Security).
 
 ### Connect Jellyfin
 1. Click **Find servers on my network**. MediaFinder sends the same UDP broadcast Jellyfin's own apps use and lists every server that answers. (You can also enter an IP range to scan, or just type the address.)
@@ -36,7 +60,7 @@ For each folder you choose whether it *contains* library folders (`Movies/`, `TV
 Then press **Sync now** (or set an automatic interval).
 
 ### Networking note
-Broadcast discovery only reaches your LAN when the container uses **host networking** (the default in `docker-compose.yml`). If you switch to a bridged network, discovery still works by scanning an IP range you type into the UI.
+Broadcast discovery only reaches your LAN when the container uses **host networking** (the default in `docker-compose.yml`; the Proxmox LXC and systemd installs are on your LAN already). If you switch to a bridged network, discovery still works by scanning an IP range you type into the UI.
 
 Settings (including NAS credentials and the Jellyfin token) are saved in `/data/config.json` with owner-only permissions. Keep `/data` private.
 
@@ -45,6 +69,10 @@ Settings (including NAS credentials and the Jellyfin token) are saved in `/data/
 | Variable | Default | Description |
 |---|---|---|
 | `DB_PATH` | `/data/mediafinder.db` | SQLite location; `config.json` is stored beside it |
+| `MEDIAFINDER_PASSWORD` | - | Require this password (otherwise set one in the UI) |
+| `MEDIAFINDER_SECRET_KEY` | - | Key for encrypting stored credentials (default: a key file beside the config) |
+| `BROWSE_ROOTS` | `/media,/mnt,/srv` | Folders the in-app folder browser may access (`*` = anywhere) |
+| `PORT` | `8080` | Listen port (Docker image / systemd install) |
 | `SYNC_ON_START` | `true` | Sync when the container starts |
 | `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `MEDIA_PATHS`, `SYNC_INTERVAL_MINUTES` | - | Pre-seed a fresh install (otherwise use the UI) |
 
