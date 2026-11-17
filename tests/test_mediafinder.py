@@ -122,17 +122,77 @@ def test_config_store_persists_and_hides_secrets(tmp_path):
     assert ConfigStore(s).snapshot()["sources"][0]["password"] == "secret"
     pub = json.dumps(store.public())
     assert "secret" not in pub and '"has_password": true' in pub
+    assert "secret" not in open(store.path).read()        # encrypted on disk
+    assert open(store.path).read().count("enc:") == 1
+
+
+def test_secret_key_from_env_and_wrong_key(tmp_path):
+    s = Settings(db_path=str(tmp_path / "d" / "t.db"), secret_key="k1")
+    ConfigStore(s).mutate(lambda d: d["sources"].append(make_source("smb", host="h", share="s", password="pw")))
+    assert ConfigStore(s).snapshot()["sources"][0]["password"] == "pw"
+    import pytest
+    with pytest.raises(ValueError):
+        ConfigStore(Settings(db_path=s.db_path, secret_key="other"))
+
+
+def _client(tmp_path, **kw):
+    s = Settings(db_path=str(tmp_path / "d" / "t.db"), sync_on_start=False, browse_roots=[str(tmp_path / "media")], **kw)
+    (tmp_path / "media" / "Movies").mkdir(parents=True, exist_ok=True)
+    return TestClient(create_app(s))
+
+
+def test_auth_flow(tmp_path):
+    with _client(tmp_path) as c:
+        assert c.get("/api/stats").status_code == 200          # open until a password is set
+        assert c.get("/api/auth/status").json()["required"] is False
+        assert c.post("/api/auth/password", json={"new": "short"}).status_code == 400
+        assert c.post("/api/auth/password", json={"new": "correct horse"}).status_code == 200
+        c.cookies.clear()
+        assert c.get("/api/stats").status_code == 401
+        assert c.get("/api/health").status_code == 200          # public
+        assert c.get("/api/auth/status").json() == {"required": True, "authenticated": False, "locked_by_env": False}
+        assert c.post("/api/auth/login", json={"password": "nope"}).status_code == 401
+        assert c.post("/api/auth/login", json={"password": "correct horse"}).status_code == 200
+        assert c.get("/api/stats").status_code == 200
+        assert "correct horse" not in open(tmp_path / "d" / "config.json").read()
+        assert c.post("/api/auth/password", json={"current": "bad", "new": ""}).status_code == 401
+        assert c.post("/api/auth/password", json={"current": "correct horse", "new": ""}).status_code == 200
+        c.cookies.clear()
+        assert c.get("/api/stats").status_code == 200
+
+
+def test_env_password_and_throttle(tmp_path):
+    with _client(tmp_path, admin_password="envpass123") as c:
+        assert c.get("/api/stats").status_code == 401
+        assert c.post("/api/auth/password", json={"new": "x" * 10}).status_code in (400, 401)
+        for _ in range(5):
+            assert c.post("/api/auth/login", json={"password": "bad"}).status_code == 401
+        assert c.post("/api/auth/login", json={"password": "envpass123"}).status_code == 429  # throttled
+    with _client(tmp_path, admin_password="envpass123") as c2:   # fresh throttle state
+        assert c2.post("/api/auth/login", json={"password": "envpass123"}).status_code == 200
+
+
+def test_browse_roots_and_cidr_scoping(tmp_path):
+    with _client(tmp_path) as c:
+        root = str(tmp_path / "media").replace("\\", "/")
+        assert c.get("/api/fs/browse").json()["dirs"][0]["name"] == "Movies"
+        assert c.get("/api/fs/browse", params={"path": str(tmp_path)}).status_code == 403
+        assert c.get("/api/fs/browse", params={"path": root + "/../"}).status_code == 403   # traversal
+        assert c.post("/api/sources", json={"type": "local", "path": str(tmp_path)}).status_code == 403
+        assert c.post("/api/sources", json={"type": "local", "path": root + "/Movies"}).status_code == 200
+        assert c.get("/api/discover/smb", params={"cidr": "8.8.8.0/24"}).status_code == 400   # public range
+        assert c.get("/api/discover/smb", params={"cidr": "garbage"}).status_code == 400
 
 
 def test_api_end_to_end(tmp_path):
     make_tree(tmp_path)
-    s = Settings(db_path=str(tmp_path.parent / (tmp_path.name + "_db") / "t.db"), sync_on_start=False)
+    s = Settings(db_path=str(tmp_path.parent / (tmp_path.name + "_db") / "t.db"), sync_on_start=False, browse_roots=["*"])
     with TestClient(create_app(s)) as c:
         assert c.post("/api/sources", json={"type": "local", "path": "/nope"}).status_code == 400
         r = c.post("/api/sources", json={"type": "local", "path": str(tmp_path), "label": "NAS"})
         assert r.status_code == 200
         assert c.get("/api/config").json()["sources"][0]["label"] == "NAS"
-        assert c.get("/api/fs/browse", params={"path": str(tmp_path)}).json()["dirs"] == ["Movies", "TV"]
+        assert c.get("/api/fs/browse", params={"path": str(tmp_path)}).json()["dirs"][0]["name"] == "Movies"
         c.post("/api/sync")
         for _ in range(100):
             if not c.get("/api/sync/status").json()["running"]:
@@ -159,3 +219,12 @@ def test_replace_source_keeps_other_sources():
     db.replace_source(conn, "b", [db.Item("b", "L", "movie", "Y")])
     db.replace_source(conn, "a", [])
     assert db.stats(conn)["total"] == 1
+
+
+def test_legacy_plaintext_config_is_migrated(tmp_path):
+    s = Settings(db_path=str(tmp_path / "d" / "t.db"))
+    cfg = tmp_path / "d" / "config.json"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps({"sources": [dict(make_source("smb", host="h", share="s", password="oldpw"))]}))
+    assert ConfigStore(s).snapshot()["sources"][0]["password"] == "oldpw"
+    assert "oldpw" not in cfg.read_text() and "enc:" in cfg.read_text()

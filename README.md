@@ -60,7 +60,13 @@ Settings (including NAS credentials and the Jellyfin token) are saved in `/data/
 | `POST /api/smb/shares`, `POST /api/smb/browse`, `GET /api/fs/browse` | Browse shares and folders |
 | `GET /api/config`, `POST /api/jellyfin/connect`, `POST/DELETE /api/sources` | Manage connections |
 
-There is no authentication built in – run it on your LAN or behind a reverse proxy that handles auth.
+## Security
+
+- **Password:** set one in **Settings → Security** (or pass `MEDIAFINDER_PASSWORD`). Until you do, the UI shows a warning and anyone who can reach the page can use it. Sessions use an HttpOnly, SameSite=Strict cookie and failed logins are throttled.
+- **Stored credentials are encrypted** (NAS passwords, Jellyfin token, TMDB key) in `config.json`. The key is `MEDIAFINDER_SECRET_KEY` if you set it, otherwise a `secret.key` file next to the config. Setting the env var keeps the key out of your data folder/backups. Lose the key and you just re-enter your connections.
+- **Folder access is scoped:** the in-app folder browser and "local folder" sources are limited to `BROWSE_ROOTS` (default `/media,/mnt,/srv`; `*` = anywhere). Symlink and `..` escapes are blocked.
+- **Network scans** are limited to private (LAN) ranges.
+- Serving it beyond your LAN? Put it behind a TLS reverse proxy (Caddy, Nginx Proxy Manager, Traefik).
 
 ## Development
 

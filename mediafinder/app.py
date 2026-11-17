@@ -6,18 +6,20 @@ import csv
 import io
 import json
 import os
+import ipaddress
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db
 from .config import ConfigStore, Settings, load_settings, make_source
+from .security import MIN_PASSWORD, SESSION_DAYS, Auth
 from .sources import discovery, folder, jellyfin, smb
 from .sync import SyncManager
 
@@ -60,10 +62,23 @@ class Interval(BaseModel):
     minutes: int
 
 
+class Login(BaseModel):
+    password: str
+
+
+class NewPassword(BaseModel):
+    current: str = ""
+    new: str = ""        # empty = remove the password
+
+
+PUBLIC_API = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/logout"}
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     store = ConfigStore(settings)
     sync = SyncManager(settings, store)
+    auth = Auth(store, store.box, settings.admin_password)
 
     async def periodic():
         while True:
@@ -84,8 +99,92 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="MediaFinder", lifespan=lifespan)
 
+    @app.middleware("http")
+    async def require_login(request: Request, call_next):
+        p = request.url.path
+        if (p.startswith("/api/") and p not in PUBLIC_API and auth.required
+                and not auth.valid_token(request.cookies.get("mf_session"))):
+            return JSONResponse({"detail": "Not signed in"}, status_code=401)
+        return await call_next(request)
+
     def conn():
         return db.connect(settings.db_path)
+
+    def set_session(request: Request, response: Response):
+        secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+        response.set_cookie("mf_session", auth.make_token(), max_age=SESSION_DAYS * 86400,
+                            httponly=True, samesite="strict", secure=secure)
+
+    # ---------- auth ----------
+    @app.get("/api/health")
+    def health():
+        return {"ok": True}
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request):
+        return {"required": auth.required,
+                "authenticated": (not auth.required) or auth.valid_token(request.cookies.get("mf_session")),
+                "locked_by_env": bool(settings.admin_password)}
+
+    @app.post("/api/auth/login")
+    def login(body: Login, request: Request, response: Response):
+        client = request.client.host if request.client else "?"
+        if auth.throttled(client):
+            raise HTTPException(429, "Too many attempts - wait a minute and try again")
+        if not auth.required or not auth.verify(body.password):
+            auth.record_failure(client)
+            raise HTTPException(401, "Wrong password")
+        set_session(request, response)
+        return {"ok": True}
+
+    @app.post("/api/auth/logout")
+    def logout(response: Response):
+        response.delete_cookie("mf_session")
+        return {"ok": True}
+
+    @app.post("/api/auth/password")
+    def change_password(body: NewPassword, request: Request, response: Response):
+        if settings.admin_password:
+            raise HTTPException(400, "The password is set by MEDIAFINDER_PASSWORD and can't be changed here")
+        if auth.required and not auth.verify(body.current):
+            raise HTTPException(401, "Current password is wrong")
+        if body.new and len(body.new) < MIN_PASSWORD:
+            raise HTTPException(400, f"Use at least {MIN_PASSWORD} characters")
+        auth.set_password(body.new)
+        if body.new:
+            set_session(request, response)
+        return {"required": bool(body.new)}
+
+    # ---------- folder access scoping ----------
+    def allowed_roots() -> list[str]:
+        if "*" in settings.browse_roots:
+            return ["*"]
+        return [os.path.realpath(r) for r in settings.browse_roots if os.path.isdir(r)]
+
+    def inside(path: str, roots: list[str]) -> bool:
+        if roots == ["*"]:
+            return True
+        try:
+            return any(os.path.commonpath([path, r]) == r for r in roots)
+        except ValueError:  # different drives
+            return False
+
+    def check_path(path: str) -> str:
+        """Resolve symlinks / '..' and make sure the path is inside an allowed root."""
+        real = os.path.realpath(path)
+        if inside(real, allowed_roots()):
+            return real
+        raise HTTPException(403, "That folder is outside the allowed locations "
+                                 f"({', '.join(settings.browse_roots)}). Mount it there or set BROWSE_ROOTS.")
+
+    def check_cidr(cidr: str) -> str:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            raise HTTPException(400, "Enter a range like 192.168.1.0/24")
+        if not net.is_private:
+            raise HTTPException(400, "Only private (LAN) ranges can be scanned")
+        return cidr
 
     # ---------- search / export ----------
     @app.get("/api/search")
@@ -216,9 +315,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                               username=body.username, password=body.password,
                               domain=body.domain, label=body.label, mode=body.mode, hint=body.hint)
         elif body.type == "local":
-            if not os.path.isdir(body.path):
+            real = check_path(body.path)
+            if not os.path.isdir(real):
                 raise HTTPException(400, f"Folder not found inside the container: {body.path}")
-            src = make_source("local", path=body.path, label=body.label, mode=body.mode, hint=body.hint)
+            src = make_source("local", path=real, label=body.label, mode=body.mode, hint=body.hint)
         else:
             raise HTTPException(400, "type must be 'local' or 'smb'")
 
@@ -249,7 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         found = {s["url"]: s for s in discovery.discover_jellyfin_udp()}
         if cidr:
             try:
-                for s in discovery.discover_jellyfin_scan(cidr):
+                for s in discovery.discover_jellyfin_scan(check_cidr(cidr)):
                     found.setdefault(s["url"], s)
             except ValueError as e:
                 raise HTTPException(400, str(e))
@@ -258,7 +358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/discover/smb")
     def discover_smb(cidr: str):
         try:
-            return {"hosts": discovery.discover_smb(cidr)}
+            return {"hosts": discovery.discover_smb(check_cidr(cidr))}
         except ValueError as e:
             raise HTTPException(400, str(e))
 
@@ -283,22 +383,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = "/" + body.path.strip("/")
         dirs = smb_call(body, lambda c: smb.list_dirs(c, body.share, path))
         parent = None if path == "/" else "/" + "/".join(path.strip("/").split("/")[:-1])
-        return {"path": path, "parent": parent, "dirs": dirs}
+        join = lambda n: ("" if path == "/" else path) + "/" + n
+        return {"path": path, "parent": parent, "dirs": [{"name": d, "path": join(d)} for d in dirs]}
 
     @app.get("/api/fs/browse")
     def fs_browse(path: str = ""):
         """Browse folders visible inside the container (e.g. a mounted NAS share)."""
+        roots = allowed_roots()
         if not path:
-            path = "/media" if os.path.isdir("/media") else os.path.abspath(os.sep)
-        path = os.path.abspath(path)
+            if roots == ["*"]:
+                path = "/media" if os.path.isdir("/media") else os.path.abspath(os.sep)
+            elif not roots:
+                raise HTTPException(400, "No browsable folders exist. Mount your media at /media "
+                                         "(or set BROWSE_ROOTS), or connect to your NAS over SMB instead.")
+            elif len(roots) == 1:
+                path = roots[0]
+            else:  # several roots: show them as the top level
+                return {"path": "", "parent": None,
+                        "dirs": [{"name": r, "path": r.replace(os.sep, "/")} for r in roots]}
+        real = check_path(path)
         try:
-            dirs = sorted(d for d in os.listdir(path)
-                          if os.path.isdir(os.path.join(path, d)) and not folder.skip_dir(d, top=True))
+            names = sorted(d for d in os.listdir(real)
+                           if os.path.isdir(os.path.join(real, d)) and not folder.skip_dir(d, top=True))
         except OSError as e:
             raise HTTPException(400, f"Cannot read {path}: {e.strerror or e}")
-        parent = os.path.dirname(path)
-        return {"path": path.replace(os.sep, "/"), "parent": parent if parent != path else None,
-                "dirs": dirs}
+        norm = real.replace(os.sep, "/")
+        up = os.path.dirname(real)
+        if up == real:
+            parent = None
+        elif inside(up, roots):
+            parent = up.replace(os.sep, "/")
+        else:
+            parent = "" if len(roots) > 1 else None   # "" = back to the list of roots
+        return {"path": norm, "parent": parent,
+                "dirs": [{"name": n, "path": f"{norm.rstrip('/')}/{n}"} for n in names]}
 
     @app.get("/")
     def index():

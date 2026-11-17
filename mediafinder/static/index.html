@@ -38,16 +38,27 @@
   .src { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bd); }
   .src:last-child { border-bottom:0; }
   .hidden { display:none !important; }
+  .overlay { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:10; }
+  .overlay .card { width:min(360px,90vw); margin:0; }
+  .banner { background:#3a2f12; border:1px solid #6b5416; color:#f0d58a; padding:.6rem .9rem; border-radius:10px; margin-bottom:1rem; display:flex; gap:.8rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+  @media (prefers-color-scheme: light) { .banner { background:#fff4d1; color:#6b5416; } }
 </style>
 </head>
 <body>
+<div id="login" class="overlay hidden"><div class="card">
+  <h2>🎞️ MediaFinder</h2>
+  <div class="row"><input id="login-pass" class="grow" type="password" placeholder="Password" autocomplete="current-password"></div>
+  <div class="row"><button class="primary" id="login-btn">Sign in</button><span id="login-msg"></span></div>
+</div></div>
 <header>
   <h1>🎞️ MediaFinder</h1>
   <nav><button id="nav-lib" class="on">Library</button><button id="nav-set">Settings</button></nav>
   <div class="stats" id="stats"></div>
   <button id="sync">Sync now</button>
+  <button id="logout" class="hidden">Sign out</button>
 </header>
 
+<div id="nopass" class="banner hidden" style="max-width:1100px;margin:1rem auto 0"><span>⚠️ No password is set: anyone who can reach this page can use it and read your stored connections.</span><button id="nopass-go">Set a password</button></div>
 <main id="view-lib">
   <div class="bar">
     <input type="search" id="q" placeholder="Search titles, descriptions, genres…" autofocus>
@@ -128,6 +139,18 @@
     <div id="src-msg"></div>
   </div>
 
+  <div class="card" id="sec-card">
+    <h2>Security</h2>
+    <div id="sec-state" class="mut"></div>
+    <div class="row" id="sec-form">
+      <input id="sec-cur" type="password" placeholder="Current password" class="grow hidden" autocomplete="current-password">
+      <input id="sec-new" type="password" placeholder="New password (min 8 characters)" class="grow" autocomplete="new-password">
+      <button class="primary" id="sec-save">Set password</button>
+      <button class="danger hidden" id="sec-remove">Remove password</button>
+    </div>
+    <div id="sec-msg"></div>
+  </div>
+
   <div class="card">
     <h2>Automatic sync</h2>
     <div class="row">
@@ -151,6 +174,7 @@ const api = async (url, body, method) => {
     throw new Error("Can't reach the MediaFinder server (is the container still running? check its logs, then reload this page)");
   }
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && !url.startsWith('/api/auth/')) { showLogin(); throw new Error('Please sign in'); }
   if (!r.ok) throw new Error(j.detail || r.statusText);
   return j;
 };
@@ -270,7 +294,7 @@ async function openDir(path) {
     const list = $('browse-list'); list.innerHTML = '';
     const add = (label, target) => { const d = document.createElement('div'); d.textContent = label; d.onclick = () => openDir(target); list.append(d); };
     if (r.parent !== null && r.parent !== undefined) add('⬆ ..', r.parent);
-    r.dirs.forEach(d => add('📁 ' + d, (r.path === '/' ? '' : r.path) + '/' + d));
+    r.dirs.forEach(d => add('📁 ' + d.name, d.path));
     if (!r.dirs.length) list.insertAdjacentHTML('beforeend', '<div class="mut" style="cursor:default">No sub-folders</div>');
     $('browse-box').classList.remove('hidden'); $('add-box').classList.remove('hidden'); say($('src-msg'), '');
   } catch (e) { say($('src-msg'), e.message, 'err'); }
@@ -285,7 +309,41 @@ $('add-btn').onclick = () => busy($('add-btn'), 'Adding…', async () => {
 });
 $('interval').onchange = async () => { await api('/api/config/interval', { minutes: +$('interval').value }, 'PUT'); say($('int-msg'), 'Saved'); setTimeout(() => say($('int-msg'), ''), 1500); };
 
-loadMeta(); load();
+/* ---------------- auth ---------------- */
+let authState = { required: false, authenticated: true, locked_by_env: false };
+function showLogin() { $('login').classList.remove('hidden'); $('login-pass').focus(); }
+async function refreshAuth() {
+  authState = await api('/api/auth/status');
+  if (authState.required && !authState.authenticated) { showLogin(); return false; }
+  $('login').classList.add('hidden');
+  $('logout').classList.toggle('hidden', !authState.required);
+  $('nopass').classList.toggle('hidden', authState.required);
+  $('sec-state').innerHTML = authState.required
+    ? `<span class="ok">● Password protection is on</span>${authState.locked_by_env ? ' (set by MEDIAFINDER_PASSWORD)' : ''}`
+    : '<span class="err">● No password set</span>';
+  $('sec-cur').classList.toggle('hidden', !authState.required);
+  $('sec-remove').classList.toggle('hidden', !authState.required || authState.locked_by_env);
+  $('sec-form').classList.toggle('hidden', authState.locked_by_env);
+  $('sec-save').textContent = authState.required ? 'Change password' : 'Set password';
+  return true;
+}
+$('login-btn').onclick = async () => {
+  try { await api('/api/auth/login', { password: $('login-pass').value }); $('login-pass').value = ''; say($('login-msg'), '');
+    if (await refreshAuth()) init(); } catch (e) { say($('login-msg'), e.message, 'err'); }
+};
+$('login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('login-btn').click(); });
+$('logout').onclick = async () => { await api('/api/auth/logout', {}); location.reload(); };
+$('nopass-go').onclick = () => { show('set'); $('sec-card').scrollIntoView(); $('sec-new').focus(); };
+const savePw = async newPw => {
+  try { await api('/api/auth/password', { current: $('sec-cur').value, new: newPw });
+    $('sec-cur').value = ''; $('sec-new').value = ''; say($('sec-msg'), newPw ? 'Password saved' : 'Password removed', 'ok'); await refreshAuth();
+  } catch (e) { say($('sec-msg'), e.message, 'err'); }
+};
+$('sec-save').onclick = () => savePw($('sec-new').value);
+$('sec-remove').onclick = () => { if (confirm('Remove the password? Anyone on your network will be able to use MediaFinder.')) savePw(''); };
+
+async function init() { await loadMeta(); await load(); }
+refreshAuth().then(ok => ok && init());
 </script>
 </body>
 </html>
