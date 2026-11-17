@@ -12,6 +12,7 @@ and an optional *hint* (auto | movie | episode) to force how files are interpret
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Iterable
 
 from guessit import guessit
@@ -30,6 +31,26 @@ def skip_dir(name: str, top: bool = False) -> bool:
     if n.startswith(("@", ".")) or n in ALWAYS_SKIP:  # Synology @eaDir, hidden dirs, recycle bins
         return True
     return (not top) and n in NESTED_SKIP
+
+
+# Sonarr/Radarr/Jellyfin style id tags in names: [tmdbid-603] {tmdb-603} (imdbid=tt0133093) [tvdbid-81189]
+ID_TAG = re.compile(r"[\[\{(]\s*(tmdb|imdb|tvdb)(?:id)?\s*[-=_: ]?\s*(tt\d+|\d+)\s*[\]\})]", re.I)
+BARE_IMDB = re.compile(r"(?<![A-Za-z0-9])(tt\d{7,9})(?![A-Za-z0-9])")
+
+
+def extract_ids(parts: list[str]) -> tuple[list[str], dict]:
+    """Pull external ids out of path parts (nearest to the file wins) and return the parts
+    with the tags removed, so they don't confuse title detection."""
+    ids: dict[str, str] = {}
+    clean = []
+    for part in reversed(parts):
+        for kind, value in ID_TAG.findall(part):
+            ids.setdefault(f"{kind.lower()}_id", value)
+        if "imdb_id" not in ids and (m := BARE_IMDB.search(part)):
+            ids["imdb_id"] = m.group(1)
+        part = BARE_IMDB.sub(" ", ID_TAG.sub(" ", part))
+        clean.append(re.sub(r"\s{2,}", " ", part).strip(" -._"))
+    return list(reversed(clean)), ids
 
 
 def _is_season_dir(name: str) -> bool:
@@ -54,6 +75,7 @@ def items_from_files(source: str, root_name: str, root_display: str, files: Iter
             continue
         nested = mode == "root" and len(parts) > 1
         library, sub = (parts[0], parts[1:]) if nested else (root_name, parts)
+        sub, ids = extract_ids(sub)
         g = guessit("/".join(sub), opts)
         title = g.get("title")
         if not title:
@@ -72,7 +94,7 @@ def items_from_files(source: str, root_name: str, root_display: str, files: Iter
             path = "/".join([root_display, *parts])
         items[key] = Item(source=source, library=library,
                           type="series" if series else "movie",
-                          title=str(title), year=g.get("year"), path=path)
+                          title=str(title), year=g.get("year"), path=path, **ids)
     return list(items.values())
 
 

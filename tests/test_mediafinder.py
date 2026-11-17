@@ -314,3 +314,51 @@ def test_smb_signing_default_and_fallback(monkeypatch):
     calls.clear()
     smb.Session("old-nas", "me", "pw").close()
     assert calls == [True, False]               # falls back for servers that can't sign
+
+
+def test_id_tags_in_names_are_parsed_and_stripped():
+    files = ["Movies/The Matrix (1999) [tmdbid-603]/The Matrix (1999).mkv",
+             "TV/Breaking Bad {tvdb-81189}/Season 01/Breaking.Bad.S01E01.mkv",
+             "Movies/Heat.1995.tt0113277.1080p.mkv",
+             "Movies/Inception (2010) (imdbid=tt1375666)/Inception.mkv"]
+    by_title = {i.title: i for i in folder.items_from_files("s", "r", "/r", files)}
+    assert by_title["The Matrix"].tmdb_id == "603"
+    assert by_title["Breaking Bad"].tvdb_id == "81189"
+    assert by_title["Heat"].imdb_id == "tt0113277" and by_title["Inception"].imdb_id == "tt1375666"
+
+
+def _it(title, year=None, type="movie", **ids):
+    return {"title": title, "year": year, "type": type, "tmdb_id": None, "imdb_id": None, "tvdb_id": None, **ids}
+
+
+def test_compare_matches_by_id_then_title():
+    from mediafinder.compare import compare, norm_title
+    assert norm_title("The Matrix: Reloaded!") == norm_title("matrix  reloaded") == norm_title("Matrix Reloaded")
+    nas = [_it("Dune", 1984), _it("Dune", 2021), _it("Alien", 1979), _it("Weird Name", 2000, tvdb_id="5", type="series"),
+           _it("Amélie", 2001), _it("Heat", 1995, tmdb_id="949"), _it("Extra Movie", 2020)]
+    jf = [_it("Dune", 2021), _it("Alien", None), _it("Totally Different", 2000, tvdb_id="5", type="series"),
+          _it("Amelie", 2001), _it("Heat (Director's Cut)", 1995, tmdb_id="949"), _it("Only On Jellyfin", 2019)]
+    r = compare(nas, jf)
+    assert sorted(i["title"] + str(i["year"]) for i in r["only_a"]) == ["Dune1984", "Extra Movie2020"]
+    assert [i["title"] for i in r["only_b"]] == ["Only On Jellyfin"]
+    assert r["matched_by_id"] == 2 and r["matched_by_title"] == 3       # tvdb "5" and tmdb "949" by id
+    # conflicting ids stop a title match
+    r2 = compare([_it("Alien", 1979, tmdb_id="348")], [_it("Alien", 1979, tmdb_id="999")])
+    assert len(r2["only_a"]) == 1 and len(r2["only_b"]) == 1
+
+
+def test_compare_api_and_csv(tmp_path):
+    make_tree(tmp_path)
+    s = Settings(db_path=str(tmp_path.parent / (tmp_path.name + "_db") / "t.db"), sync_on_start=False, browse_roots=["*"])
+    with TestClient(create_app(s)) as c:
+        c.post("/api/sources", json={"type": "local", "path": str(tmp_path / "Movies"), "label": "A", "mode": "library"})
+        c.post("/api/sources", json={"type": "local", "path": str(tmp_path / "TV"), "label": "B", "mode": "library"})
+        c.post("/api/sync")
+        for _ in range(100):
+            if not c.get("/api/sync/status").json()["running"]:
+                break
+            time.sleep(0.1)
+        r = c.get("/api/compare", params={"a": "A", "b": "B"}).json()
+        assert r["a_total"] == 3 and r["b_total"] == 1 and r["both"] == 0 and len(r["only_b"]) == 1
+        body = c.get("/api/compare", params={"a": "A", "b": "B", "format": "csv"}).text
+        assert "only in A" in body and "only in B" in body and "Breaking Bad" in body

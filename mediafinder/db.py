@@ -5,7 +5,7 @@ import os
 import re
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 # v1 schema (kept as-is so existing databases upgrade cleanly)
@@ -53,6 +53,24 @@ MIGRATIONS = [
         updated INTEGER, removed INTEGER, error TEXT
     );
     """,
+    # 2 -> 3: external ids, how an item was identified, the as-scanned title (so identification
+    #         and manual edits can be undone), user corrections and a TMDB response cache.
+    """
+    ALTER TABLE items ADD COLUMN tmdb_id TEXT;
+    ALTER TABLE items ADD COLUMN imdb_id TEXT;
+    ALTER TABLE items ADD COLUMN tvdb_id TEXT;
+    ALTER TABLE items ADD COLUMN match_state TEXT NOT NULL DEFAULT 'name';
+    ALTER TABLE items ADD COLUMN raw_title TEXT;
+    ALTER TABLE items ADD COLUMN raw_year INTEGER;
+    UPDATE items SET raw_title = title, raw_year = year;
+    UPDATE items SET match_state = 'jellyfin' WHERE source = 'jellyfin';
+    CREATE TABLE IF NOT EXISTS overrides (
+        source TEXT NOT NULL, key TEXT NOT NULL, title TEXT, year INTEGER, type TEXT,
+        tmdb_id TEXT, imdb_id TEXT, tvdb_id TEXT, ignored INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (source, key)
+    );
+    CREATE TABLE IF NOT EXISTS tmdb_cache (cache_key TEXT PRIMARY KEY, body TEXT, fetched REAL);
+    """,
 ]
 
 
@@ -66,6 +84,16 @@ class Item:
     path: str | None = None
     overview: str | None = None
     genres: str | None = None
+    tmdb_id: str | None = None
+    imdb_id: str | None = None
+    tvdb_id: str | None = None
+    match_state: str = "name"     # name (from file names) | tmdb | manual | unmatched | jellyfin
+    raw_title: str | None = None  # as scanned, before TMDB / manual changes
+    raw_year: int | None = None
+
+    def __post_init__(self):
+        if self.raw_title is None:
+            self.raw_title, self.raw_year = self.title, self.year
 
     @property
     def key(self) -> str:
@@ -90,33 +118,55 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+FIELDS = ("library", "type", "title", "year", "overview", "genres", "tmdb_id", "imdb_id", "tvdb_id",
+          "match_state", "raw_title", "raw_year")
+
+
+def _apply_override(it: Item, ov: dict) -> Item:
+    return replace(it, title=ov["title"] or it.title, year=ov["year"] if ov["year"] is not None else it.year,
+                   type=ov["type"] or it.type, tmdb_id=ov["tmdb_id"] or it.tmdb_id,
+                   imdb_id=ov["imdb_id"] or it.imdb_id, tvdb_id=ov["tvdb_id"] or it.tvdb_id,
+                   match_state="manual")
+
+
 def replace_source(conn: sqlite3.Connection, source: str, items: Iterable[Item]) -> dict:
     """Bring one source up to date, touching only what changed (the FTS triggers keep the
-    search index in step). Returns counts of added / updated / removed / total."""
+    search index in step). Returns counts of added / updated / removed / total.
+
+    User corrections (the ``overrides`` table) are applied on the way in, and titles that were
+    already identified via TMDB are left alone as long as the file name hasn't changed."""
+    overrides = {r["key"]: dict(r) for r in conn.execute("SELECT * FROM overrides WHERE source = ?", (source,))}
     new: dict[str, Item] = {}
     for it in items:
+        ov = overrides.get(it.key)
+        if ov:
+            if ov["ignored"]:
+                continue
+            it = _apply_override(it, ov)
         k, n = it.key, 2
         while k in new:             # two items with an identical key: keep both
             k, n = f"{it.key}#{n}", n + 1
         new[k] = it
     old = {r["key"]: r for r in conn.execute(
-        "SELECT id, key, library, type, title, year, path, overview, genres FROM items WHERE source = ?",
-        (source,))}
+        f"SELECT id, key, {', '.join(FIELDS)} FROM items WHERE source = ?", (source,))}
     added = updated = 0
+    cols = ", ".join(FIELDS)
+    marks = ",".join("?" * len(FIELDS))
     with conn:
         for k, it in new.items():
             row = old.get(k)
+            values = tuple(getattr(it, f) for f in FIELDS)
             if row is None:
-                conn.execute(
-                    "INSERT INTO items (source, library, type, title, year, path, overview, genres, key)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
-                    (it.source, it.library, it.type, it.title, it.year, it.path, it.overview, it.genres, k))
+                conn.execute(f"INSERT INTO items (source, path, key, {cols}) VALUES (?,?,?,{marks})",
+                             (it.source, it.path, k, *values))
                 added += 1
-            elif (row["library"], row["type"], row["title"], row["year"], row["overview"], row["genres"]) != (
-                    it.library, it.type, it.title, it.year, it.overview, it.genres):
-                conn.execute(
-                    "UPDATE items SET library=?, type=?, title=?, year=?, overview=?, genres=? WHERE id=?",
-                    (it.library, it.type, it.title, it.year, it.overview, it.genres, row["id"]))
+                continue
+            if (row["match_state"] in ("tmdb", "unmatched") and it.match_state == "name"
+                    and (row["raw_title"], row["raw_year"]) == (it.raw_title, it.raw_year)):
+                continue            # already identified; the file name hasn't changed
+            if tuple(row[f] for f in FIELDS) != values:
+                sets = ", ".join(f"{f}=?" for f in FIELDS)
+                conn.execute(f"UPDATE items SET {sets} WHERE id=?", (*values, row["id"]))
                 updated += 1
         gone = [(r["id"],) for k, r in old.items() if k not in new]
         conn.executemany("DELETE FROM items WHERE id = ?", gone)

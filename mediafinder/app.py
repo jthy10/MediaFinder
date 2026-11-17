@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import compare as cmp
 from . import db
 from .config import ConfigStore, Settings, load_settings, make_source
 from .security import MIN_PASSWORD, SESSION_DAYS, Auth
@@ -234,7 +235,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     unique.append(i)
             items = unique
         if format == "json":
-            body = json.dumps([{k: i[k] for k in ("title", "year", "type", "library")}
+            body = json.dumps([{k: i[k] for k in ("title", "year", "type", "library", "tmdb_id", "imdb_id", "tvdb_id")}
                                for i in items], indent=2, ensure_ascii=False)
             media = "application/json"
         elif format == "txt":
@@ -244,13 +245,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             buf = io.StringIO()
             w = csv.writer(buf)
-            w.writerow(["title", "year", "type", "library", "source", "path"])
+            w.writerow(["title", "year", "type", "library", "source", "path", "tmdb_id", "imdb_id", "tvdb_id"])
             for i in items:
                 w.writerow([i["title"], i["year"] or "", i["type"], i["library"],
-                            i["source"], i["path"] or ""])
+                            i["source"], i["path"] or "", i["tmdb_id"] or "", i["imdb_id"] or "",
+                            i["tvdb_id"] or ""])
             body, media = buf.getvalue(), "text/csv; charset=utf-8"
         return Response(body, media_type=media, headers={
             "Content-Disposition": f'attachment; filename="mediafinder.{format}"'})
+
+    # ---------- compare ----------
+    def resolve_side(spec: str, all_items: list[dict]) -> tuple[list[dict], str]:
+        """spec: '@jellyfin', '@folders' (every NAS/folder source) or comma-separated source labels."""
+        if spec == "@jellyfin":
+            return [i for i in all_items if i["source"] == "jellyfin"], "Jellyfin"
+        if spec == "@folders":
+            return [i for i in all_items if i["source"] != "jellyfin"], "NAS / folders"
+        labels = {s for s in spec.split(",") if s}
+        return [i for i in all_items if i["source"] in labels], ", ".join(sorted(labels)) or "(none)"
+
+    @app.get("/api/compare")
+    def compare_sources(a: str = "@folders", b: str = "@jellyfin", type: str | None = None,
+                        format: str = Query("json", pattern="^(json|csv)$")):
+        """Titles present in A but not B, in B but not A, and how many match."""
+        c = conn()
+        try:
+            _, everything = db.search(c, limit=None)
+        finally:
+            c.close()
+        if type:
+            everything = [i for i in everything if i["type"] == type]
+        side_a, label_a = resolve_side(a or "@folders", everything)
+        side_b, label_b = resolve_side(b or "@jellyfin", everything)
+        r = cmp.compare(side_a, side_b)
+        if format == "csv":
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["status", "title", "year", "type", "library", "source", "path", "tmdb_id", "imdb_id", "tvdb_id"])
+            for status, rows in ((f"only in {label_a}", r["only_a"]), (f"only in {label_b}", r["only_b"])):
+                for i in rows:
+                    w.writerow([status, i["title"], i["year"] or "", i["type"], i["library"], i["source"],
+                                i["path"] or "", i["tmdb_id"] or "", i["imdb_id"] or "", i["tvdb_id"] or ""])
+            return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
+                "Content-Disposition": 'attachment; filename="mediafinder-compare.csv"'})
+        return {"a_label": label_a, "b_label": label_b, "a_total": len(side_a), "b_total": len(side_b), **r}
 
     # ---------- sync ----------
     @app.post("/api/sync", status_code=202)

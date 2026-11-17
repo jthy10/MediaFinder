@@ -38,6 +38,9 @@
   .src { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bd); }
   .src:last-child { border-bottom:0; }
   .hidden { display:none !important; }
+  .two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:1.2rem; }
+  .two-col .card { margin:0; overflow:auto; max-height:70vh; }
+  .li { padding:.4rem 0; border-bottom:1px solid var(--bd); } .li:last-child { border-bottom:0; }
   .syncbar { max-width:1100px; margin:1rem auto 0; padding:.6rem .9rem; border-radius:10px; border:1px solid var(--bd); background:var(--card); display:flex; justify-content:space-between; gap:.8rem; flex-wrap:wrap; }
   .syncbar.bad { border-color:var(--err); }
   .overlay { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:10; }
@@ -54,7 +57,7 @@
 </div></div>
 <header>
   <h1>🎞️ MediaFinder</h1>
-  <nav><button id="nav-lib" class="on">Library</button><button id="nav-set">Settings</button></nav>
+  <nav><button id="nav-lib" class="on">Library</button><button id="nav-cmp">Compare</button><button id="nav-set">Settings</button></nav>
   <div class="stats" id="stats"></div>
   <button id="sync">Sync now</button>
   <button id="logout" class="hidden">Sign out</button>
@@ -76,6 +79,20 @@
     <tbody id="rows"></tbody>
   </table>
   <div class="foot"><span id="count"></span><span><button id="prev">←</button> <button id="next">→</button></span></div>
+</main>
+
+<main id="view-cmp" class="hidden">
+  <div class="bar">
+    <label class="mut">A <select id="cmp-a"></select></label>
+    <span class="mut">vs</span>
+    <label class="mut">B <select id="cmp-b"></select></label>
+    <select id="cmp-type"><option value="">All types</option><option value="movie">Movies</option><option value="series">Series</option></select>
+    <button class="primary" id="cmp-go">Compare</button>
+    <button id="cmp-csv" class="hidden">Export differences (CSV)</button>
+  </div>
+  <div class="hint" style="margin-bottom:1rem">Finds what one source has that the other doesn't, e.g. files on your NAS that Jellyfin hasn't picked up. Titles are matched by TMDB / IMDb / TVDB id when known (including <code>[tvdbid-123]</code> tags in names), otherwise by title and year.</div>
+  <div id="cmp-summary" class="card hidden"></div>
+  <div class="two-col" id="cmp-cols"></div>
 </main>
 
 <main id="view-set" class="hidden">
@@ -189,11 +206,11 @@ const busy = async (btn, label, fn) => { const o = btn.textContent; btn.disabled
 
 /* ---------------- views ---------------- */
 function show(v) {
-  $('view-lib').classList.toggle('hidden', v !== 'lib'); $('view-set').classList.toggle('hidden', v !== 'set');
-  $('nav-lib').classList.toggle('on', v === 'lib'); $('nav-set').classList.toggle('on', v === 'set');
+  for (const k of ['lib', 'cmp', 'set']) { $('view-' + k).classList.toggle('hidden', v !== k); $('nav-' + k).classList.toggle('on', v === k); }
   if (v === 'set') loadConfig();
+  if (v === 'cmp') loadCompareOptions();
 }
-$('nav-lib').onclick = () => show('lib'); $('nav-set').onclick = () => show('set');
+$('nav-lib').onclick = () => show('lib'); $('nav-set').onclick = () => show('set'); $('nav-cmp').onclick = () => show('cmp');
 
 /* ---------------- library / search ---------------- */
 let offset = 0, total = 0, timer;
@@ -357,6 +374,35 @@ $('add-btn').onclick = () => busy($('add-btn'), 'Adding…', async () => {
   } catch (e) { say($('add-msg'), e.message, 'err'); }
 });
 $('interval').onchange = async () => { await api('/api/config/interval', { minutes: +$('interval').value }, 'PUT'); say($('int-msg'), 'Saved'); setTimeout(() => say($('int-msg'), ''), 1500); };
+
+/* ---------------- compare ---------------- */
+async function loadCompareOptions() {
+  const [libs] = await Promise.all([api('/api/libraries')]);
+  const labels = [...new Set(libs.map(l => l.source))].filter(s => s !== 'jellyfin');
+  const opts = [['@folders', 'All NAS / folders'], ['@jellyfin', 'Jellyfin'], ...labels.map(l => [l, l])];
+  for (const [id, def] of [['cmp-a', '@folders'], ['cmp-b', '@jellyfin']]) {
+    const cur = $(id).value || def;
+    $(id).innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+    $(id).value = opts.some(o => o[0] === cur) ? cur : def;
+  }
+}
+const cmpQuery = () => new URLSearchParams({ a: $('cmp-a').value, b: $('cmp-b').value, type: $('cmp-type').value });
+const cmpList = (title, rows, other) => `<div class="card"><h2>${esc(title)} <span class="mut">(${n(rows.length)})</span></h2>` +
+  (rows.length ? rows.slice(0, 300).map(i => `<div class="li">${esc(i.title)} ${i.year ? '<span class="mut">(' + i.year + ')</span>' : ''} <span class="tag">${esc(i.type)}</span>
+    <div class="path">${esc(i.path || i.library)}</div></div>`).join('') + (rows.length > 300 ? `<div class="mut" style="padding:.6rem 0">Showing 300 of ${n(rows.length)} — export the CSV for the full list.</div>` : '')
+    : `<div class="mut">Nothing — everything here is also in ${esc(other)}.</div>`) + '</div>';
+$('cmp-go').onclick = () => busy($('cmp-go'), 'Comparing…', async () => {
+  try {
+    if (!$('cmp-a').value) await loadCompareOptions();
+    const r = await api('/api/compare?' + cmpQuery());
+    $('cmp-summary').classList.remove('hidden');
+    $('cmp-summary').innerHTML = `<b>${n(r.both)}</b> titles in both <span class="mut">(${n(r.matched_by_id)} matched by id, ${n(r.matched_by_title)} by title &amp; year)</span> ·
+      <b>${n(r.only_a.length)}</b> only in ${esc(r.a_label)} · <b>${n(r.only_b.length)}</b> only in ${esc(r.b_label)}`;
+    $('cmp-cols').innerHTML = cmpList('Only in ' + r.a_label, r.only_a, r.b_label) + cmpList('Only in ' + r.b_label, r.only_b, r.a_label);
+    $('cmp-csv').classList.remove('hidden');
+  } catch (e) { $('cmp-summary').classList.remove('hidden'); say($('cmp-summary'), e.message, 'card err'); }
+});
+$('cmp-csv').onclick = () => { const q = cmpQuery(); q.set('format', 'csv'); location.href = '/api/compare?' + q; };
 
 /* ---------------- auth ---------------- */
 let authState = { required: false, authenticated: true, locked_by_env: false };

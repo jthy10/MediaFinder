@@ -86,7 +86,7 @@ def fetch_items(url: str, token: str, user_id: str | None = None,
                 params = {
                     "ParentId": parent, "Recursive": "true",
                     "IncludeItemTypes": ",".join(TYPE_MAP),
-                    "Fields": "Path,Overview,Genres,ProductionYear",
+                    "Fields": "Path,Overview,Genres,ProductionYear,ProviderIds",
                     "StartIndex": start, "Limit": PAGE,
                 }
                 if user_id:
@@ -96,6 +96,7 @@ def fetch_items(url: str, token: str, user_id: str | None = None,
                 data = resp.json()
                 batch = data.get("Items", [])
                 for it in batch:
+                    pid = {k.lower(): v for k, v in (it.get("ProviderIds") or {}).items()}
                     items.append(Item(
                         source="jellyfin", library=name,
                         type=TYPE_MAP.get(it.get("Type"), "other"),
@@ -103,6 +104,8 @@ def fetch_items(url: str, token: str, user_id: str | None = None,
                         year=it.get("ProductionYear"), path=it.get("Path"),
                         overview=it.get("Overview"),
                         genres=", ".join(it.get("Genres") or []) or None,
+                        tmdb_id=pid.get("tmdb"), imdb_id=pid.get("imdb"), tvdb_id=pid.get("tvdb"),
+                        match_state="jellyfin",
                     ))
                 start += len(batch)
                 if progress:
