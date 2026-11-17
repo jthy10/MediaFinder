@@ -72,7 +72,7 @@ def test_jellyfin_fetch_and_auth():
         if req.url.path == "/Users/AuthenticateByName":
             ok = json.loads(req.content)["Pw"] == "pw"
             return httpx.Response(200 if ok else 401, json={"AccessToken": "tok", "User": {"Id": "u1"}})
-        assert req.headers["X-Emby-Token"] == "key"
+        assert 'Token="key"' in req.headers["Authorization"]
         if req.url.path == "/Library/VirtualFolders":
             return httpx.Response(200, json=[{"Name": "Films", "ItemId": "abc"}])
         return httpx.Response(200, json={"TotalRecordCount": 1, "Items": [

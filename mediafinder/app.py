@@ -191,7 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 raise HTTPException(400, "Provide an API key or a username and password")
             with httpx.Client(timeout=15) as c:  # prove the token can read libraries
-                jellyfin._folders(c, url, {"X-Emby-Token": token}, user_id)
+                jellyfin._folders(c, url, jellyfin.auth_headers(token), user_id)
         except HTTPException:
             raise
         except PermissionError as e:
