@@ -4,3 +4,4 @@ httpx>=0.27
 guessit>=3.8
 pysmb>=1.2.10
 cryptography>=42
+smbprotocol>=1.13
