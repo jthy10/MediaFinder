@@ -29,7 +29,7 @@ class Settings:
 def load_settings() -> Settings:
     env = os.environ.get
     return Settings(
-        db_path=env("DB_PATH", "/data/mediafinder.db"),
+        db_path=env("DB_PATH") or ("/data/mediafinder.db" if os.path.isdir("/data") else "./data/mediafinder.db"),
         config_path=env("CONFIG_PATH", ""),
         sync_on_start=env("SYNC_ON_START", "true").lower() in ("1", "true", "yes"),
         jellyfin_url=env("JELLYFIN_URL", "").rstrip("/"),
