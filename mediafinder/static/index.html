@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MediaFinder</title>
+<style>
+  :root { color-scheme: dark light; --bg:#14161a; --card:#1d2026; --fg:#e6e8eb; --mut:#8b93a0; --acc:#6c8cff; --bd:#2a2e36; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f5f6f8; --card:#fff; --fg:#1a1d21; --mut:#69707d; --bd:#dde0e5; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; gap:1rem; align-items:center; padding:1rem 1.5rem; border-bottom:1px solid var(--bd); flex-wrap:wrap; }
+  h1 { font-size:1.2rem; margin:0; }
+  .stats { color:var(--mut); font-size:.9rem; flex:1; }
+  main { max-width:1100px; margin:0 auto; padding:1.5rem; }
+  .bar { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:1rem; }
+  input,select,button { font:inherit; padding:.55rem .75rem; border-radius:8px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+  input[type=search] { flex:1; min-width:220px; }
+  button { cursor:pointer; } button.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--bd); border-radius:10px; overflow:hidden; }
+  th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--bd); }
+  th { color:var(--mut); font-weight:500; font-size:.85rem; }
+  tr:last-child td { border-bottom:0; }
+  .tag { font-size:.75rem; padding:.1rem .45rem; border-radius:99px; border:1px solid var(--bd); color:var(--mut); }
+  .path { color:var(--mut); font-size:.8rem; word-break:break-all; }
+  .foot { display:flex; justify-content:space-between; align-items:center; margin-top:1rem; color:var(--mut); }
+  .msg { color:var(--mut); padding:2rem; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎞️ MediaFinder</h1>
+  <div class="stats" id="stats"></div>
+  <button id="sync">Sync now</button>
+</header>
+<main>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search titles, descriptions, genres…" autofocus>
+    <select id="type"><option value="">All types</option><option value="movie">Movies</option><option value="series">Series</option><option value="album">Albums</option></select>
+    <select id="library"><option value="">All libraries</option></select>
+    <select id="source"><option value="">All sources</option><option value="jellyfin">Jellyfin</option><option value="folder">Folder</option></select>
+    <select id="fmt"><option value="csv">CSV</option><option value="txt">Plain text</option><option value="json">JSON</option></select>
+    <button class="primary" id="export">Export list</button>
+  </div>
+  <table>
+    <thead><tr><th>Title</th><th>Year</th><th>Type</th><th>Library</th><th>Source</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="foot"><span id="count"></span><span><button id="prev">←</button> <button id="next">→</button></span></div>
+</main>
+<script>
+const $ = id => document.getElementById(id), PAGE = 50;
+let offset = 0, total = 0, timer;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const params = () => {
+  const p = new URLSearchParams();
+  for (const k of ['q','type','library','source']) if ($(k).value) p.set(k, $(k).value);
+  return p;
+};
+async function load() {
+  const p = params(); p.set('limit', PAGE); p.set('offset', offset);
+  const r = await (await fetch('/api/search?' + p)).json();
+  total = r.total;
+  $('rows').innerHTML = r.items.length ? r.items.map(i => `
+    <tr><td>${esc(i.title)}<div class="path">${esc(i.path)}</div></td><td>${esc(i.year)}</td>
+    <td><span class="tag">${esc(i.type)}</span></td><td>${esc(i.library)}</td><td>${esc(i.source)}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="msg">No results. Configure a source and press “Sync now”.</td></tr>';
+  $('count').textContent = total ? `${offset + 1}–${Math.min(offset + PAGE, total)} of ${total}` : '';
+  $('prev').disabled = offset === 0; $('next').disabled = offset + PAGE >= total;
+}
+async function loadMeta() {
+  const [s, libs] = await Promise.all([fetch('/api/stats').then(r => r.json()), fetch('/api/libraries').then(r => r.json())]);
+  $('stats').textContent = `${s.total} titles · ` + Object.entries(s.by_type).map(([k, v]) => `${v} ${k}`).join(' · ');
+  const cur = $('library').value;
+  $('library').innerHTML = '<option value="">All libraries</option>' +
+    [...new Set(libs.map(l => l.library))].map(l => `<option ${l === cur ? 'selected' : ''}>${esc(l)}</option>`).join('');
+}
+const refresh = () => { offset = 0; load(); };
+$('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(refresh, 200); });
+['type','library','source'].forEach(k => $(k).addEventListener('change', refresh));
+$('prev').onclick = () => { offset = Math.max(0, offset - PAGE); load(); };
+$('next').onclick = () => { offset += PAGE; load(); };
+$('export').onclick = () => { const p = params(); p.set('format', $('fmt').value); location.href = '/api/export?' + p; };
+$('sync').onclick = async () => {
+  $('sync').disabled = true; $('sync').textContent = 'Syncing…';
+  await fetch('/api/sync', { method: 'POST' });
+  while ((await (await fetch('/api/sync/status')).json()).running) await new Promise(r => setTimeout(r, 1000));
+  const st = await (await fetch('/api/sync/status')).json();
+  if (Object.keys(st.errors).length) alert('Sync errors:\n' + Object.entries(st.errors).map(([k, v]) => `${k}: ${v}`).join('\n'));
+  $('sync').disabled = false; $('sync').textContent = 'Sync now';
+  await loadMeta(); refresh();
+};
+loadMeta(); load();
+</script>
+</body>
+</html>

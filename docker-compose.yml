@@ -1,0 +1,12 @@
+services:
+  mediafinder:
+    build: .
+    container_name: mediafinder
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./data:/data
+      # Optional: mount your NAS/media share read-only to scan folders directly.
+      # - /mnt/nas/media:/media:ro
