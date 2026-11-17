@@ -12,7 +12,7 @@ and an optional *hint* (auto | movie | episode) to force how files are interpret
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from typing import Callable, Iterable
 
 from guessit import guessit
 
@@ -38,12 +38,15 @@ def _is_season_dir(name: str) -> bool:
 
 
 def items_from_files(source: str, root_name: str, root_display: str, files: Iterable[str],
-                     mode: str = "root", hint: str = "auto") -> list[Item]:
+                     mode: str = "root", hint: str = "auto",
+                     progress: Callable[[int], None] | None = None) -> list[Item]:
     """files: paths relative to the root, '/'-separated."""
     items: dict[tuple, Item] = {}
     opts = {"type": hint} if hint in ("movie", "episode") else {}
     root_display = root_display.rstrip("/")
-    for rel in files:
+    for seen, rel in enumerate(files, start=1):
+        if progress and seen % 100 == 0:
+            progress(seen)
         parts = [p for p in rel.split("/") if p]
         if not parts or parts[-1].startswith("._"):
             continue
@@ -83,8 +86,8 @@ def walk_local(root: str) -> Iterable[str]:
             yield f if rel_dir == "." else "/".join([*rel_dir.split(os.sep), f])
 
 
-def scan_source(src: dict) -> list[Item]:
+def scan_source(src: dict, progress: Callable[[int], None] | None = None) -> list[Item]:
     root = os.path.abspath(src["path"])
     root_name = os.path.basename(root.rstrip("/\\")) or root
     return items_from_files(src["label"], root_name, root.replace(os.sep, "/"),
-                            walk_local(root), src.get("mode", "root"), src.get("hint", "auto"))
+                            walk_local(root), src.get("mode", "root"), src.get("hint", "auto"), progress)

@@ -38,6 +38,8 @@
   .src { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.5rem 0; border-bottom:1px solid var(--bd); }
   .src:last-child { border-bottom:0; }
   .hidden { display:none !important; }
+  .syncbar { max-width:1100px; margin:1rem auto 0; padding:.6rem .9rem; border-radius:10px; border:1px solid var(--bd); background:var(--card); display:flex; justify-content:space-between; gap:.8rem; flex-wrap:wrap; }
+  .syncbar.bad { border-color:var(--err); }
   .overlay { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:10; }
   .overlay .card { width:min(360px,90vw); margin:0; }
   .banner { background:#3a2f12; border:1px solid #6b5416; color:#f0d58a; padding:.6rem .9rem; border-radius:10px; margin-bottom:1rem; display:flex; gap:.8rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
@@ -58,6 +60,7 @@
   <button id="logout" class="hidden">Sign out</button>
 </header>
 
+<div id="syncbar" class="syncbar hidden"></div>
 <div id="nopass" class="banner hidden" style="max-width:1100px;margin:1rem auto 0"><span>⚠️ No password is set: anyone who can reach this page can use it and read your stored connections.</span><button id="nopass-go">Set a password</button></div>
 <main id="view-lib">
   <div class="bar">
@@ -79,6 +82,7 @@
   <div class="card" id="jf-card">
     <h2>Jellyfin server</h2>
     <div id="jf-current" class="row"></div>
+    <div id="jf-status" class="hint" style="margin-bottom:.6rem"></div>
     <div class="row">
       <button id="jf-scan">🔍 Find servers on my network</button>
       <input id="jf-cidr" class="grow" placeholder="Optional: also scan range, e.g. 192.168.1.0/24" title="Broadcast discovery needs host networking; scanning a range works from any container">
@@ -120,6 +124,7 @@
         <button id="smb-connect">List shares</button>
       </div>
       <div id="smb-shares" class="chips"></div>
+      <div class="row"><input id="smb-share" class="grow" placeholder="…or type a share name, e.g. media"><button id="smb-open">Browse share</button></div>
     </div>
 
     <div id="browse-box" class="hidden">
@@ -218,12 +223,48 @@ $('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout
 $('prev').onclick = () => { offset = Math.max(0, offset - PAGE); load(); };
 $('next').onclick = () => { offset += PAGE; load(); };
 $('export').onclick = () => { const p = params(); p.set('format', $('fmt').value); location.href = '/api/export?' + p; };
-$('sync').onclick = () => busy($('sync'), 'Syncing…', async () => {
-  await api('/api/sync', {});
-  let st; do { await new Promise(r => setTimeout(r, 1000)); st = await api('/api/sync/status'); } while (st.running);
-  if (Object.keys(st.errors).length) alert('Sync problems:\n' + Object.entries(st.errors).map(([k, v]) => `${k}: ${v}`).join('\n'));
-  await loadMeta(); refresh();
-});
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ago = ts => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; };
+const n = v => (v ?? 0).toLocaleString();
+function srcStatus(s) {
+  if (!s) return '';
+  if (s.state === 'pending') return '<span class="mut">⏳ waiting…</span>';
+  if (s.state === 'running') return `<span class="mut">⏳ scanning${s.files ? ' — ' + n(s.files) + ' ' + (s.files_label || 'items so far') : '…'}</span>`;
+  if (s.state === 'error') return `<span class="err">✗ ${esc(s.error)}</span>`;
+  if (s.state === 'done') return `<span class="ok">✓ ${n(s.total)} titles</span> <span class="mut">${s.added ? '+' + n(s.added) + ' new' : 'no changes'}${s.removed ? ', −' + n(s.removed) + ' removed' : ''} · ${ago(s.finished)}</span>`;
+  return '<span class="mut">Not synced yet</span>';
+}
+let lastCfg = null, lastSync = null;
+function renderSyncBar(st, finished) {
+  const bar = $('syncbar'), entries = Object.entries(st.sources);
+  const bad = entries.filter(([, s]) => s.state === 'error');
+  if (st.running) {
+    bar.className = 'syncbar';
+    bar.innerHTML = '<b>Syncing…</b><span>' + entries.map(([k, s]) => `${esc(k)}: ${srcStatus(s)}`).join(' &nbsp;·&nbsp; ') + '</span>';
+  } else if (finished && bad.length) {
+    bar.className = 'syncbar bad';
+    bar.innerHTML = `<span>${bad.map(([k, s]) => `<b>${esc(k)}</b>: <span class="err">${esc(s.error)}</span>`).join('<br>')}<br><span class="mut">The previous results for these sources were kept.</span></span><button id="syncbar-x">Dismiss</button>`;
+    $('syncbar-x').onclick = () => bar.classList.add('hidden');
+  } else if (finished) {
+    const add = entries.reduce((a, [, s]) => a + (s.added || 0), 0), rem = entries.reduce((a, [, s]) => a + (s.removed || 0), 0);
+    bar.className = 'syncbar';
+    bar.innerHTML = `<span class="ok">✓ Sync finished — ${add ? '+' + n(add) + ' new' : 'no new titles'}${rem ? ', −' + n(rem) + ' removed' : ''}</span>`;
+    setTimeout(() => bar.classList.add('hidden'), 6000);
+  } else bar.classList.add('hidden');
+}
+let watching = false;
+async function watchSync() {
+  if (watching) return; watching = true; $('sync').disabled = true; $('sync').textContent = 'Syncing…';
+  try {
+    let st;
+    for (;;) {
+      st = await api('/api/sync/status'); lastSync = st; renderSyncBar(st); renderSources();
+      if (!st.running) break; await sleep(800);
+    }
+    renderSyncBar(st, true); await loadMeta(); refresh(); renderSources();
+  } finally { watching = false; $('sync').disabled = false; $('sync').textContent = 'Sync now'; }
+}
+$('sync').onclick = async () => { try { await api('/api/sync', {}); watchSync(); } catch (e) { alert(e.message); } };
 
 /* ---------------- settings: Jellyfin ---------------- */
 async function loadConfig() {
@@ -232,18 +273,25 @@ async function loadConfig() {
     ? `<span class="ok">● Connected:</span> <b>${esc(c.jellyfin.name)}</b> <span class="mut">${esc(c.jellyfin.url)}</span> <button class="danger" id="jf-off">Disconnect</button>`
     : '<span class="mut">Not connected</span>';
   if ($('jf-off')) $('jf-off').onclick = async () => { await api('/api/jellyfin', undefined, 'DELETE'); loadConfig(); };
-  $('src-list').innerHTML = c.sources.length ? c.sources.map(s => `
-    <div class="src"><div><b>${esc(s.label)}</b> <span class="tag">${s.type === 'smb' ? 'SMB' : 'folder'}</span>
-      <span class="tag">${s.mode === 'library' ? 'single library' : 'contains libraries'}</span>
-      <div class="path">${esc(s.type === 'smb' ? `smb://${s.host}/${s.share}${s.path === '/' ? '' : s.path}` : s.path)}</div></div>
-      <button class="danger" data-rm="${s.id}">Remove</button></div>`).join('')
-    : '<div class="mut">No folders added yet.</div>';
-  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('/api/sources/' + b.dataset.rm, undefined, 'DELETE'); loadConfig(); });
+  lastCfg = c; lastSync = await api('/api/sync/status'); renderSources();
   $('interval').value = String(c.sync_interval_minutes);
   if (!$('smb-cidr').value || !$('jf-cidr').value) {
     const { subnets } = await api('/api/discover/subnets');
     if (subnets[0]) { $('smb-cidr').value ||= subnets[0]; $('jf-cidr').placeholder = `Optional: also scan range, e.g. ${subnets[0]}`; }
   }
+}
+function renderSources() {
+  if (!lastCfg) return;
+  const st = (lastSync || { sources: {} }).sources;
+  $('jf-status').innerHTML = lastCfg.jellyfin ? srcStatus(st['jellyfin']) : '';
+  $('src-list').innerHTML = lastCfg.sources.length ? lastCfg.sources.map(s => `
+    <div class="src"><div><b>${esc(s.label)}</b> <span class="tag">${s.type === 'smb' ? 'SMB' : 'folder'}</span>
+      <span class="tag">${s.mode === 'library' ? 'single library' : 'contains libraries'}</span>
+      <div class="path">${esc(s.type === 'smb' ? `smb://${s.host}/${s.share}${s.path === '/' ? '' : s.path}` : s.path)}</div>
+      <div>${srcStatus(st[s.label])}</div></div>
+      <button class="danger" data-rm="${s.id}">Remove</button></div>`).join('')
+    : '<div class="mut">No folders added yet.</div>';
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('/api/sources/' + b.dataset.rm, undefined, 'DELETE'); loadConfig(); });
 }
 function chips(el, items, label, pick) {
   el.innerHTML = items.length ? '' : '<span class="mut">None found.</span>';
@@ -279,11 +327,12 @@ $('smb-scan').onclick = () => busy($('smb-scan'), 'Scanning…', async () => {
   } catch (e) { say($('smb-found'), e.message, 'err'); }
 });
 $('smb-connect').onclick = () => busy($('smb-connect'), 'Connecting…', async () => {
-  try { const { shares } = await api('/api/smb/shares', smbCreds());
+  try { const { shares, note } = await api('/api/smb/shares', smbCreds());
     chips($('smb-shares'), shares, s => '📁 ' + s, s => { pick = { kind: 'smb', share: s, path: '/' }; openDir('/'); });
-    say($('src-msg'), shares.length ? 'Connected. Choose a share:' : 'Connected, but no shares are visible to this account.', 'ok');
+    say($('src-msg'), shares.length ? 'Connected. Choose a share:' : (note || 'Connected, but no shares are visible to this account.'), 'ok');
   } catch (e) { say($('src-msg'), e.message, 'err'); }
 });
+$('smb-open').onclick = () => { const s = $('smb-share').value.trim().replace(/^[\\/]+|[\\/]+$/g, ''); if (s) { pick = { kind: 'smb', share: s, path: '/' }; openDir('/'); } };
 async function openDir(path) {
   try {
     const r = pick.kind === 'smb' && stype() === 'smb'
@@ -342,7 +391,7 @@ const savePw = async newPw => {
 $('sec-save').onclick = () => savePw($('sec-new').value);
 $('sec-remove').onclick = () => { if (confirm('Remove the password? Anyone on your network will be able to use MediaFinder.')) savePw(''); };
 
-async function init() { await loadMeta(); await load(); }
+async function init() { await loadMeta(); await load(); const st = await api('/api/sync/status'); if (st.running) watchSync(); }
 refreshAuth().then(ok => ok && init());
 </script>
 </body>

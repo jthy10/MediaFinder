@@ -12,7 +12,8 @@ Both sources can be enabled together. Titles are stored in a local SQLite databa
 - Instant search across titles, descriptions and genres
 - Filter by type (movie / series / album), library, source
 - Export the title list as **CSV, plain text or JSON** (honours your current search/filters, de-duplicates titles found in both sources)
-- Manual "Sync now" button plus optional periodic re-sync
+- Manual "Sync now" button plus optional periodic re-sync, with live per-source progress and the result of the last run
+- Incremental syncs: only changed titles are written, so large libraries stay fast
 - Single container, no external services
 
 ## Install
@@ -52,7 +53,7 @@ Open `http://<host>:8080`, go to **Settings**, and set everything up there - no 
 2. Sign in with your Jellyfin username and password, or paste an API key (Dashboard → Advanced → API Keys). Only an access token is stored, never your password.
 
 ### Connect your NAS
-- **Network share (SMB)** - click **Find NAS on my network** (scans a range for SMB hosts), pick a host or type its address, enter credentials, **List shares**, then browse into the folder you want and **Add**. Works with Synology, QNAP, TrueNAS, Unraid, Windows and Samba. Nothing is mounted, so the container needs no special privileges.
+- **Network share (SMB)** - click **Find NAS on my network** (scans a range for SMB hosts), pick a host or type its address, enter credentials, **List shares**, then browse into the folder you want and **Add**. Works with Synology, QNAP, TrueNAS, Unraid, Windows and Samba over **SMB 2/3 (signing and encryption supported)**. Nothing is mounted, so the container needs no special privileges. If a server doesn't list its shares automatically, just type the share name.
 - **Folder inside the container** - if you'd rather mount the NAS yourself (NFS, CIFS, bind mount), pick the mounted folder with the built-in folder browser.
 
 For each folder you choose whether it *contains* library folders (`Movies/`, `TV/`...) or *is* a single library, and optionally force "movies" or "TV shows" if auto-detection guesses wrong.

@@ -84,7 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         while True:
             await asyncio.sleep(30)
             mins = store.snapshot()["sync_interval_minutes"]
-            last = sync.status["last_run"] or 0
+            last = sync.last_run or 0
             if mins > 0 and time.time() - last >= mins * 60 and sync.has_sources():
                 await asyncio.to_thread(sync.run)
 
@@ -255,15 +255,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ---------- sync ----------
     @app.post("/api/sync", status_code=202)
     async def start_sync():
-        if sync.status["running"]:
-            return {"started": False, "status": sync.status}
-        sync.status["running"] = True
+        if sync.running:
+            return {"started": False}
+        sync.running = True   # visible to status polls immediately
         asyncio.create_task(asyncio.to_thread(sync.run))
         return {"started": True}
 
     @app.get("/api/sync/status")
     def sync_status():
-        return sync.status
+        return sync.snapshot()
 
     # ---------- configuration ----------
     @app.get("/api/config")
@@ -364,24 +364,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def smb_call(creds: SmbCreds, fn):
         try:
-            c = smb.connect(creds.host, creds.username, creds.password, creds.domain)
+            session = smb.Session(creds.host, creds.username, creds.password, creds.domain)
         except Exception as e:
             raise HTTPException(502, f"Could not connect to {creds.host}: {e}")
         try:
-            return fn(c)
+            return fn(session)
         except Exception as e:
             raise HTTPException(502, f"SMB error: {e}")
         finally:
-            c.close()
+            session.close()
 
     @app.post("/api/smb/shares")
     def smb_shares(body: SmbCreds):
-        return {"shares": smb_call(body, smb.list_shares)}
+        smb_call(body, lambda s: None)   # proves the address and login work (SMB 2/3, signing, encryption)
+        try:
+            return {"shares": smb.list_shares(body.host, body.username, body.password, body.domain), "note": ""}
+        except Exception:
+            return {"shares": [], "note": "Connected, but this server doesn't list its shares automatically. "
+                                         "Type the share name below."}
 
     @app.post("/api/smb/browse")
     def smb_browse(body: SmbBrowse):
         path = "/" + body.path.strip("/")
-        dirs = smb_call(body, lambda c: smb.list_dirs(c, body.share, path))
+        dirs = smb_call(body, lambda s: s.list_dirs(body.share, path))
         parent = None if path == "/" else "/" + "/".join(path.strip("/").split("/")[:-1])
         join = lambda n: ("" if path == "/" else path) + "/" + n
         return {"path": path, "parent": parent, "dirs": [{"name": d, "path": join(d)} for d in dirs]}

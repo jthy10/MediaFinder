@@ -45,26 +45,43 @@ def test_folder_scan_single_library_mode(tmp_path):
     assert len(items) == 3
 
 
-def test_smb_walk_and_scan():
-    files = {
+class FakeSmbclient:
+    """Stands in for smbclient (smbprotocol) with an in-memory share."""
+    def __init__(self, tree):
+        self.tree, self.registered = tree, None
+    def register_session(self, host, **kw):
+        self.registered = (host, kw)
+    def reset_connection_cache(self, **kw):
+        pass
+    def scandir(self, unc, **kw):
+        parts = [p for p in unc.split("\\") if p]
+        path = "/" + "/".join(parts[2:])
+        if path not in self.tree:
+            raise OSError("no such dir")
+        return [SimpleNamespace(name=n, is_dir=(lambda full=(path.rstrip("/") + "/" + n): full in self.tree))
+                for n in self.tree[path]]
+
+
+def test_smb_walk_and_scan(monkeypatch):
+    tree = {
         "/": ["Movies", "TV", "@eaDir"], "/@eaDir": ["x.mkv"],
         "/Movies": ["Alien (1979)"], "/Movies/Alien (1979)": ["Alien (1979).mkv", "poster.jpg"],
         "/TV": ["Lost"], "/TV/Lost": ["Season 1"], "/TV/Lost/Season 1": ["Lost.S01E01.mkv"],
     }
-    def entry(parent, name):
-        full = (parent.rstrip("/") + "/" + name)
-        return SimpleNamespace(filename=name, isDirectory=full in files)
-    class FakeConn:
-        def listPath(self, share, path):
-            return [entry(path, n) for n in files[path]]
-        def close(self): pass
-    paths = sorted(smb.walk(FakeConn(), "media", "/"))
+    fake = FakeSmbclient(tree)
+    monkeypatch.setattr(smb, "smbclient", fake)
+    with smb.Session("nas", "me", "pw", "HOME") as s:
+        assert fake.registered[0] == "nas" and fake.registered[1]["username"] == "HOME\me"
+        assert s.list_dirs("media", "/") == ["Movies", "TV"]          # @eaDir hidden
+        paths = sorted(s.walk("media", "/"))
     assert paths == ["Movies/Alien (1979)/Alien (1979).mkv", "Movies/Alien (1979)/poster.jpg",
                      "TV/Lost/Season 1/Lost.S01E01.mkv"]
     items = folder.items_from_files("nas", "media", "smb://nas/media", paths)
     assert {(i.library, i.title, i.type) for i in items} == {
         ("Movies", "Alien", "movie"), ("TV", "Lost", "series")}
     assert [i.path for i in items if i.type == "series"] == ["smb://nas/media/TV/Lost"]
+    src = make_source("smb", host="nas", share="media", username="me", password="pw")
+    assert len(smb.scan_source(src)) == 2
 
 
 def test_jellyfin_fetch_and_auth():
@@ -228,3 +245,72 @@ def test_legacy_plaintext_config_is_migrated(tmp_path):
     cfg.write_text(json.dumps({"sources": [dict(make_source("smb", host="h", share="s", password="oldpw"))]}))
     assert ConfigStore(s).snapshot()["sources"][0]["password"] == "oldpw"
     assert "oldpw" not in cfg.read_text() and "enc:" in cfg.read_text()
+
+
+def test_incremental_replace_and_fts_stay_in_sync():
+    conn = db.connect(":memory:")
+    mk = lambda title, path, year=2000: db.Item("s", "L", "movie", title, year, path)
+    r = db.replace_source(conn, "s", [mk("Alien", "/a"), mk("Heat", "/h"), mk("Ronin", "/r")])
+    assert r == {"total": 3, "added": 3, "updated": 0, "removed": 0}
+    # unchanged -> no writes; one retitled, one removed, one new
+    r = db.replace_source(conn, "s", [mk("Alien", "/a"), mk("Heat (Remaster)", "/h"), mk("Se7en", "/s")])
+    assert r == {"total": 3, "added": 1, "updated": 1, "removed": 1}
+    names = lambda q: [i["title"] for i in db.search(conn, q)[1]]
+    assert names("remaster") == ["Heat (Remaster)"] and names("ronin") == [] and names("se7") == ["Se7en"]
+    assert names("heat") == ["Heat (Remaster)"]
+    assert db.replace_source(conn, "s", [mk("Alien", "/a")] * 2)["total"] == 2   # duplicate keys kept
+
+
+def test_migration_from_v1_database(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(db.BASE_SCHEMA)
+    old.execute("INSERT INTO items (source,library,type,title,year,path) VALUES ('s','L','movie','Alien',1979,'/a')")
+    old.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')")
+    old.commit(); old.close()
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS)
+    assert conn.execute("SELECT key FROM items").fetchone()[0] == "L/a"
+    assert db.search(conn, "alie")[0] == 1
+    assert db.replace_source(conn, "s", [db.Item("s", "L", "movie", "Alien", 1979, "/a")])["added"] == 0
+
+
+def test_sync_status_has_per_source_progress_and_history(tmp_path):
+    make_tree(tmp_path)
+    s = Settings(db_path=str(tmp_path.parent / (tmp_path.name + "_db") / "t.db"), sync_on_start=False, browse_roots=["*"])
+    with TestClient(create_app(s)) as c:
+        c.post("/api/sources", json={"type": "local", "path": str(tmp_path), "label": "NAS"})
+        before = c.get("/api/sync/status").json()
+        assert before["sources"]["NAS"]["state"] == "idle"
+        c.post("/api/sync")
+        for _ in range(100):
+            st = c.get("/api/sync/status").json()
+            if not st["running"]:
+                break
+            time.sleep(0.1)
+        nas = st["sources"]["NAS"]
+        assert nas["state"] == "done" and nas["total"] == 4 and nas["added"] == 4 and nas["finished"]
+        c.post("/api/sync")
+        time.sleep(0.5)
+        for _ in range(100):
+            if not c.get("/api/sync/status").json()["running"]:
+                break
+            time.sleep(0.1)
+        again = c.get("/api/sync/status").json()["sources"]["NAS"]
+        assert again["added"] == 0 and again["total"] == 4     # incremental: nothing re-written
+
+
+def test_smb_signing_default_and_fallback(monkeypatch):
+    calls = []
+    class Fake(FakeSmbclient):
+        def register_session(self, host, **kw):
+            calls.append(kw["require_signing"])
+            if kw["require_signing"] and host == "old-nas":
+                raise OSError("server does not support signing")
+    monkeypatch.setattr(smb, "smbclient", Fake({"/": []}))
+    smb.Session("modern-nas", "me", "pw").close()
+    assert calls == [True]                      # signed by default
+    calls.clear()
+    smb.Session("old-nas", "me", "pw").close()
+    assert calls == [True, False]               # falls back for servers that can't sign

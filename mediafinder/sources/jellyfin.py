@@ -71,7 +71,7 @@ def _folders(client, url, headers, user_id) -> list[dict]:
 
 
 def fetch_items(url: str, token: str, user_id: str | None = None,
-                client: httpx.Client | None = None) -> list[Item]:
+                client: httpx.Client | None = None, progress=None) -> list[Item]:
     own = client is None
     client = client or httpx.Client(timeout=30)
     headers = auth_headers(token)
@@ -105,6 +105,8 @@ def fetch_items(url: str, token: str, user_id: str | None = None,
                         genres=", ".join(it.get("Genres") or []) or None,
                     ))
                 start += len(batch)
+                if progress:
+                    progress(len(items))
                 if not batch or start >= data.get("TotalRecordCount", 0):
                     break
         return items
